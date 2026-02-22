@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import gc
 import os
-import copy
+from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
@@ -112,6 +113,52 @@ class FSDP2Engine:
 
     def is_lora_module_wrap(self, model) -> bool:
         return any(isinstance(module, LoraLayer) for module in model.modules())
+
+    def _iter_name_aliases(self, name: str, for_adapter: bool = False) -> list[str]:
+        """Generate stable aliases for PEFT/non-PEFT checkpoint key matching."""
+        aliases = [name]
+
+        if name.startswith("base_model.model."):
+            aliases.append(name.removeprefix("base_model.model."))
+
+        if ".base_layer." in name:
+            aliases.append(name.replace(".base_layer.", "."))
+
+        if ".default." in name:
+            aliases.append(name.replace(".default.", "."))
+
+        # Compose transforms so order is stable and duplicate-free.
+        snapshot = list(aliases)
+        for alias in snapshot:
+            if alias.startswith("base_model.model."):
+                aliases.append(alias.removeprefix("base_model.model."))
+            if ".base_layer." in alias:
+                aliases.append(alias.replace(".base_layer.", "."))
+            if for_adapter and ".default." in alias:
+                aliases.append(alias.replace(".default.", "."))
+
+        return list(dict.fromkeys([alias for alias in aliases if alias]))
+
+    def _get_param_map(self, model: HFModel, for_adapter: bool = False) -> dict:
+        """Build checkpoint-key → param mapping, handling PEFT name mangling.
+
+        PEFT renames base weights: ``base_model.model.<orig>.base_layer.weight``
+        and LoRA weights: ``<orig>.lora_A.default.weight``, while checkpoints use
+        the original / adapter-saved names.
+        """
+        if not self.is_lora_module_wrap(model):
+            return dict(model.named_parameters())
+
+        param_map = {}
+
+        def _add_alias(alias: str, param) -> None:
+            if alias and alias not in param_map:
+                param_map[alias] = param
+
+        for name, param in model.named_parameters():
+            for alias in self._iter_name_aliases(name, for_adapter=for_adapter):
+                _add_alias(alias, param)
+        return param_map
 
     def prepare_model(self, model: HFModel) -> HFModel:
         if self.fsdp_mesh is None:
@@ -212,10 +259,13 @@ class FSDP2Engine:
                 logger.info("Using HF Meta Loading (Chunk Load).")
             self._load_weights_from_hf_checkpoint(model, hf_model_path)
 
+        if self.is_lora_module_wrap(model) and getattr(model, "_adapter_meta_path", None):
+            self._load_adapter_weights(model, model._adapter_meta_path)
+
         return model
 
     def _save_non_persistent_buffers(self, model: HFModel) -> dict:
-        """save non-persistent buffers, such as inv_freq"""
+        """Save non-persistent buffers, such as inv_freq."""
         saved = {}
         for mod_name, module in model.named_modules():
             for buf_name in module._non_persistent_buffers_set:
@@ -228,7 +278,7 @@ class FSDP2Engine:
         return saved
 
     def _restore_non_persistent_buffers(self, model: HFModel, saved_buffers: dict):
-        """register saved non-persistent buffers to model."""
+        """Register saved non-persistent buffers to model."""
         if not saved_buffers:
             return
         device = get_current_accelerator()
@@ -246,12 +296,11 @@ class FSDP2Engine:
 
     def shard_model(self, model: HFModel) -> HFModel:
         if model.device.type == "meta":
-            
             non_persistent_buffers = self._save_non_persistent_buffers(model)
 
             if getattr(model.config, "tie_word_embeddings", None):
                 model.tie_weights()
-            
+
             model = self.prepare_model(model)
             model = self.materialize_and_load(model, hf_model_path=model.config.name_or_path, dcp_path=self.dcp_path)
 
@@ -270,7 +319,8 @@ class FSDP2Engine:
 
             options = StateDictOptions(full_state_dict=False, cpu_offload=True)
             local_state_dict = get_model_state_dict(model, options=options)
-            dcp.load(state_dict=local_state_dict, checkpoint_id=dcp_path)
+            load_state_dict = self._build_dcp_load_state_dict(local_state_dict, dcp_path)
+            dcp.load(state_dict=load_state_dict, checkpoint_id=dcp_path)
             set_model_state_dict(model, local_state_dict, options=options)
 
             if self.rank == 0:
@@ -278,7 +328,79 @@ class FSDP2Engine:
 
         except Exception as e:
             logger.error(f"Failed to load from DCP: {e}")
-            raise e
+            raise
+
+    def _build_dcp_load_state_dict(self, local_state_dict: dict, dcp_path: str) -> dict:
+        """Build a checkpoint-keyed state dict view for strict DCP loading.
+
+        DCP load is strict about input keys existing in checkpoint metadata. For
+        PEFT-wrapped models, runtime keys (e.g. ``base_model.model.*``) may differ
+        from saved keys (e.g. ``lm_head.weight``). This function creates a
+        checkpoint-keyed dict that points to the same tensor objects.
+        """
+        import torch.distributed.checkpoint as dcp
+
+        try:
+            reader = dcp.FileSystemReader(dcp_path)
+            metadata = reader.read_metadata()
+        except Exception as e:
+            if self.rank == 0:
+                logger.warning(f"Failed to read DCP metadata for key remapping: {e}")
+            return local_state_dict
+
+        key_candidates = []
+        state_dict_meta = getattr(metadata, "state_dict_metadata", None)
+        if isinstance(state_dict_meta, Mapping):
+            key_candidates.extend(state_dict_meta.keys())
+
+        planner_data = getattr(metadata, "planner_data", None)
+        if isinstance(planner_data, Mapping):
+            key_candidates.extend(planner_data.keys())
+
+        ckpt_keys: set[str] = set()
+        for key in key_candidates:
+            if isinstance(key, str):
+                ckpt_keys.add(key)
+            elif hasattr(key, "fqn") and isinstance(key.fqn, str):
+                ckpt_keys.add(key.fqn)
+
+        if not ckpt_keys:
+            return local_state_dict
+
+        if self.rank == 0:
+            logger.info(f"Detected {len(ckpt_keys)} tensor keys from DCP metadata.")
+
+        load_state_dict = {}
+        remapped = 0
+        missing = []
+
+        for model_key, value in local_state_dict.items():
+            target_key = None
+            for alias in self._iter_name_aliases(model_key, for_adapter=True):
+                if alias in ckpt_keys:
+                    target_key = alias
+                    break
+
+            if target_key is None:
+                missing.append(model_key)
+                continue
+
+            load_state_dict[target_key] = value
+            if target_key != model_key:
+                remapped += 1
+
+        if self.rank == 0:
+            logger.info(
+                f"DCP key mapping prepared: {len(load_state_dict)} keys, {remapped} remapped aliases, "
+                f"{len(missing)} unmatched model keys."
+            )
+            if missing:
+                logger.warning(f"Unmatched model keys in DCP mapping (first 5): {missing[:5]}")
+
+        if not load_state_dict:
+            raise ValueError("DCP key mapping failed: no model keys matched checkpoint metadata.")
+
+        return load_state_dict
 
     def _load_weights_from_hf_checkpoint(self, model: HFModel, hf_model_path: str):
         import glob
@@ -320,7 +442,7 @@ class FSDP2Engine:
         if not checkpoint_files:
             raise ValueError(f"No checkpoint files found in {hf_model_path}")
 
-        param_map = dict(model.named_parameters())
+        param_map = self._get_param_map(model, for_adapter=False)
         total_files = len(checkpoint_files)
 
         for i, ckpt_file in enumerate(checkpoint_files):
@@ -342,6 +464,57 @@ class FSDP2Engine:
                         self._copy_weights(param_map[key], tensor)
                 del state_dict
                 gc.collect()
+
+    def _load_adapter_weights(self, model: HFModel, adapter_path: str):
+        """Load pre-trained LoRA adapter weights onto a materialized model."""
+        safetensors_file = os.path.join(adapter_path, "adapter_model.safetensors")
+        bin_file = os.path.join(adapter_path, "adapter_model.bin")
+
+        param_map = self._get_param_map(model, for_adapter=True)
+        if os.path.exists(safetensors_file):
+            from safetensors import safe_open
+
+            loaded = 0
+            unmatched = []
+            sample_keys = []
+            with safe_open(safetensors_file, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    if len(sample_keys) < 5:
+                        sample_keys.append(key)
+                    if key in param_map:
+                        self._copy_weights(param_map[key], f.get_tensor(key))
+                        loaded += 1
+                    else:
+                        unmatched.append(key)
+        elif os.path.exists(bin_file):
+            state_dict = torch.load(bin_file, map_location="cpu", weights_only=True)
+            loaded = 0
+            unmatched = []
+            sample_keys = []
+            for key, tensor in state_dict.items():
+                if len(sample_keys) < 5:
+                    sample_keys.append(key)
+                if key in param_map:
+                    self._copy_weights(param_map[key], tensor)
+                    loaded += 1
+                else:
+                    unmatched.append(key)
+            del state_dict
+        else:
+            raise ValueError(f"No adapter checkpoint found in {adapter_path}")
+
+        if loaded == 0:
+            raise ValueError(
+                f"Failed to map adapter weights from {adapter_path}: no keys matched model parameters. "
+                f"Example adapter keys: {sample_keys}"
+            )
+
+        if self.rank == 0:
+            logger.info(f"Loaded {loaded} adapter params from {adapter_path}")
+            if unmatched:
+                logger.warning(f"{len(unmatched)} adapter keys were not matched. First keys: {unmatched[:5]}")
+
+        gc.collect()
 
     def _resolve_hf_checkpoint_dir(self, hf_model_path: str) -> str:
         """Resolve a HF model identifier or local path to a local directory containing checkpoint files.

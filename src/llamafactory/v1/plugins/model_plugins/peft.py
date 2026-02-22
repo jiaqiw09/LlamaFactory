@@ -16,7 +16,7 @@ import re
 from typing import Literal, TypedDict, Union
 
 import torch
-from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from peft import LoraConfig, PeftConfig, PeftModel, TaskType, get_peft_model
 
 from ...config import InputArgument, get_args
 from ...core.model_engine import ModelEngine
@@ -136,7 +136,20 @@ def load_adapter(model: HFModel, adapter_name_or_path: Union[list[str], str], is
         model = merge_adapters(model, adapter_to_merge)
 
     if adapter_to_resume is not None:
-        model = PeftModel.from_pretrained(model, adapter_to_resume, is_trainable=is_train)
+        if model.device.type == "meta":
+            # On meta tensors, direct adapter weight loading becomes a no-op copy.
+            # Build adapter modules from config, then load real weights after materialization.
+            peft_config = PeftConfig.from_pretrained(adapter_to_resume)
+            peft_config.inference_mode = not is_train
+            model = get_peft_model(model, peft_config)
+            model._adapter_meta_path = adapter_to_resume
+            logger.info_rank0(
+                f"Prepared LoRA structure from adapter config at {adapter_to_resume}. "
+                "Adapter weights will be loaded after meta materialization."
+            )
+        else:
+            model = PeftModel.from_pretrained(model, adapter_to_resume, is_trainable=is_train)
+
         if is_train:
             logger.info_rank0(
                 f"Resuming training from existing LoRA adapter at {adapter_to_resume}. "
@@ -151,6 +164,12 @@ def load_adapter(model: HFModel, adapter_name_or_path: Union[list[str], str], is
 @PeftPlugin("lora").register()
 def get_lora_model(model: HFModel, config: LoraConfigDict, is_train: bool = False) -> HFModel:
     adapter_name_or_path = config.get("adapter_name_or_path")
+
+    if is_train and model.device.type == "meta" and not adapter_name_or_path:
+        raise ValueError(
+            "Meta-initialized LoRA training does not support creating a new adapter automatically. "
+            "Please create the adapter in advance and pass it via `adapter_name_or_path`."
+        )
 
     if adapter_name_or_path:
         return load_adapter(model, adapter_name_or_path, is_train)
