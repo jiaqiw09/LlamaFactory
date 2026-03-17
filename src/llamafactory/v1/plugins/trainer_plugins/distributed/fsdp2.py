@@ -25,11 +25,14 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from torch.distributed.tensor.parallel import parallelize_module
 
 from ....accelerator.helper import get_current_accelerator
-from ....accelerator.interface import DistributedInterface
+from ....accelerator.interface import Dim, DistributedInterface
 from ....utils.logging import get_logger
 from ....utils.types import HFModel, Processor
+from .ep_adapters import get_ep_adapter
+from .expert_parallel import ExpertParallel
 
 
 logger = get_logger(__name__)
@@ -76,7 +79,12 @@ class FSDP2Engine:
         self.offload_params = dist_config.get("offload_params", False)
         self.pin_memory = dist_config.get("pin_memory", True)
         self.dcp_path = dist_config.get("dcp_path", None)
+        self.ep_size = int(dist_config.get("ep_size", 1))
+        self.ep_model_adapter = str(dist_config.get("ep_model_adapter", "auto"))
         self.device_mesh = self.dist_interface.data_device_mesh
+        self.ep_mesh = None
+        self.efsdp_mesh = None
+        self._is_ep_enabled = self.ep_size > 1
 
         if self.device_mesh is None:
             logger.warning(
@@ -92,6 +100,15 @@ class FSDP2Engine:
             logger.info(f"Using Device Mesh: {self.fsdp_mesh}")
         else:
             self.fsdp_mesh = None
+
+        if self._is_ep_enabled:
+            self.ep_mesh = self.dist_interface.get_device_mesh(Dim.EP)
+            self.efsdp_mesh = self.dist_interface.get_device_mesh(Dim.EFSDP)
+            if self.ep_mesh is None or self.efsdp_mesh is None:
+                raise ValueError(
+                    f"ep_size={self.ep_size} requires sparse mesh. "
+                    "Please ensure distributed config sets compatible dp_size/cp_size/ep_size."
+                )
 
     def get_mp_policy(self) -> MixedPrecisionPolicy:
         if self.mixed_precision == "bf16":
@@ -112,6 +129,29 @@ class FSDP2Engine:
 
     def is_lora_module_wrap(self, model) -> bool:
         return any(isinstance(module, LoraLayer) for module in model.modules())
+
+    def apply_ep(self, model: HFModel) -> HFModel:
+        if not self._is_ep_enabled or self.ep_mesh is None:
+            return model
+
+        adapter = get_ep_adapter(model, self.ep_model_adapter)
+        patched_experts = set()
+        for _, module in model.named_modules():
+            experts = adapter.get_expert_module(module)
+            if experts is None:
+                continue
+            if id(experts) in patched_experts:
+                continue
+            expert_plan = ExpertParallel(token_permute_backend=adapter.permute_backend)
+            parallelize_module(experts, self.ep_mesh, expert_plan)
+            patched_experts.add(id(experts))
+
+        if patched_experts and self.rank == 0:
+            logger.info(
+                f"Applied Expert Parallel to {len(patched_experts)} expert modules, "
+                f"adapter={adapter.__class__.__name__}, permute_backend={adapter.permute_backend}."
+            )
+        return model
 
     def prepare_model(self, model: HFModel) -> HFModel:
         if self.fsdp_mesh is None:
@@ -149,6 +189,7 @@ class FSDP2Engine:
 
             logger.info("Applying FSDP wrap for LoRA layer separately.")
 
+        adapter = get_ep_adapter(model, self.ep_model_adapter) if self._is_ep_enabled else None
         for name, module in model.named_modules():
             should_wrap = False
 
@@ -159,6 +200,36 @@ class FSDP2Engine:
                     should_wrap = True
 
             if should_wrap:
+                experts = adapter.get_expert_module(module) if adapter is not None else None
+                if experts is not None and self.efsdp_mesh is not None:
+                    fully_shard(
+                        experts,
+                        mesh=self.efsdp_mesh,
+                        reshard_after_forward=self.reshard_after_forward,
+                        mp_policy=mp_policy,
+                        offload_policy=CPUOffloadPolicy(pin_memory=self.pin_memory) if self.offload_params else None,
+                    )
+                    
+                    # EP modules need to correct the gradient divide factor because their gradients are reduced 
+                    # over a smaller group (EFSDP group) but should be averaged over the global world size
+                    # (assuming the loss is averaged over the global batch size).
+                    # For FSDP2, set_gradient_divide_factor sets the divisor for the reduce-scatter.
+                    # By default it is the mesh size (efsdp_size). We need to scale it to world_size.
+                    # Actually, we need to be careful: 
+                    # 1. Standard FSDP divides by mesh.size().
+                    # 2. We want the effective divisor to be world_size.
+                    # 3. So we should set the factor to world_size.
+                    if hasattr(experts, "set_gradient_divide_factor"):
+                        experts.set_gradient_divide_factor(float(self.world_size))
+                    elif hasattr(experts, "set_reduce_scatter_divide_factor"): # Compatibility for older PyTorch versions
+                        experts.set_reduce_scatter_divide_factor(float(self.world_size))
+                    
+                    num_experts = adapter.get_num_experts(experts)
+                    if self.rank == 0 and num_experts is not None:
+                        logger.info(
+                            f"Applied experts FSDP on efsdp mesh, ep_size={self.ep_size}, num_experts={num_experts}."
+                        )
+
                 fully_shard(
                     module,
                     mesh=self.fsdp_mesh,
@@ -250,6 +321,7 @@ class FSDP2Engine:
             if getattr(model.config, "tie_word_embeddings", None):
                 model.tie_weights()
 
+            model = self.apply_ep(model)
             model = self.prepare_model(model)
             model = self.materialize_and_load(model, hf_model_path=model.config.name_or_path, dcp_path=self.dcp_path)
 
@@ -260,6 +332,7 @@ class FSDP2Engine:
             self._restore_non_persistent_buffers(model, non_persistent_buffers)
 
         else:
+            model = self.apply_ep(model)
             model = self.prepare_model(model)
         return model
 

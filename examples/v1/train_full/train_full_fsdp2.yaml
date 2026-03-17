@@ -13,6 +13,9 @@ quant_config: null
 dist_config:
   name: fsdp2
   dcp_path: null # /mnt/f/pretrain_models/Qwen3-0.6B-dcp
+  ep_size: 1
+  ep_model_adapter: auto
+  ep_permute_backend: default
 
 ### data
 train_dataset: data/v1_sft_demo.yaml

@@ -80,6 +80,12 @@ class DistributedConfig(TypedDict, total=False):
     """Data parallel size, default to world_size // cp_size."""
     cp_size: NotRequired[int]
     """Context parallel size, default to 1."""
+    ep_size: NotRequired[int]
+    """Expert parallel size, default to 1."""
+    ep_model_adapter: NotRequired[str]
+    """Expert module adapter, default to auto."""
+    ep_permute_backend: NotRequired[str]
+    """Token permute backend, default to default."""
     timeout: NotRequired[int]
     """Timeout for distributed communication, default to 600."""
 

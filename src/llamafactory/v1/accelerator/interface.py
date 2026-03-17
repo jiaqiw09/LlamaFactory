@@ -49,6 +49,8 @@ class Dim(StrEnum):
     MP_SHARD = "mp_shard"
     DP = "dp"
     CP = "cp"
+    EFSDP = "efsdp"
+    EP = "ep"
 
 
 @dataclass
@@ -63,6 +65,8 @@ class DistributedStrategy:
     """Data parallel size, default to world_size // cp_size."""
     cp_size: int = 1
     """Context parallel size, default to 1."""
+    ep_size: int = 1
+    """Expert parallel size, default to 1."""
 
     def __post_init__(self) -> None:
         if not helper.is_distributed():
@@ -85,6 +89,13 @@ class DistributedStrategy:
                 f"got {self.dp_size} * {self.cp_size} != {helper.get_world_size()}."
             )
 
+        if self.ep_size < 1:
+            raise ValueError(f"ep_size must be >= 1, got {self.ep_size}.")
+        if self.dp_size % self.ep_size != 0:
+            raise ValueError(
+                f"dp_size must be divisible by ep_size, got dp_size={self.dp_size}, ep_size={self.ep_size}."
+            )
+
     @property
     def model_mesh_shape(self) -> tuple[int, int]:
         """Model parallel mesh shape."""
@@ -104,6 +115,18 @@ class DistributedStrategy:
     def data_mesh_dim_names(self) -> tuple[str, str]:
         """Data parallel mesh dimension names."""
         return (Dim.DP.value, Dim.CP.value)
+
+    @property
+    def sparse_mesh_shape(self) -> tuple[int, int, int] | None:
+        if self.ep_size <= 1:
+            return None
+        return (self.cp_size, self.dp_size // self.ep_size, self.ep_size)
+
+    @property
+    def sparse_mesh_dim_names(self) -> tuple[str, str, str] | None:
+        if self.ep_size <= 1:
+            return None
+        return (Dim.CP.value, Dim.EFSDP.value, Dim.EP.value)
 
 
 class DistributedInterface:
@@ -141,6 +164,7 @@ class DistributedInterface:
                 mp_shard_size=config.get("mp_shard_size", None),
                 dp_size=config.get("dp_size", None),
                 cp_size=config.get("cp_size", 1),
+                ep_size=config.get("ep_size", 1),
             )
             timeout = config.get("timeout", 18000)
 
@@ -156,9 +180,18 @@ class DistributedInterface:
                 mesh_shape=self.strategy.data_mesh_shape,
                 mesh_dim_names=self.strategy.data_mesh_dim_names,
             )
+            if self.strategy.sparse_mesh_shape is not None and self.strategy.sparse_mesh_dim_names is not None:
+                self.sparse_device_mesh = init_device_mesh(
+                    device_type=self.current_device.type,
+                    mesh_shape=self.strategy.sparse_mesh_shape,
+                    mesh_dim_names=self.strategy.sparse_mesh_dim_names,
+                )
+            else:
+                self.sparse_device_mesh = None
         else:
             self.model_device_mesh = None
             self.data_device_mesh = None
+            self.sparse_device_mesh = None
 
         self._initialized = True
         logger.info_rank0(f"DistributedInterface initialized: {self}.")
@@ -167,7 +200,8 @@ class DistributedInterface:
         return (
             f"DistributedInterface(strategy={self.strategy}), is_distributed={self._is_distributed}, "
             f"current_device={self.current_device}, rank={self._rank}, world_size={self._world_size}, "
-            f"model_device_mesh={self.model_device_mesh}, data_device_mesh={self.data_device_mesh}"
+            f"model_device_mesh={self.model_device_mesh}, data_device_mesh={self.data_device_mesh}, "
+            f"sparse_device_mesh={self.sparse_device_mesh}"
         )
 
     def get_device_mesh(self, dim: Dim | None = None) -> DeviceMesh | None:
@@ -176,6 +210,12 @@ class DistributedInterface:
             raise ValueError("dim must be specified.")
         elif not self._is_distributed:
             return None
+        elif (
+            self.sparse_device_mesh is not None
+            and self.strategy.sparse_mesh_dim_names is not None
+            and dim in self.strategy.sparse_mesh_dim_names
+        ):
+            return self.sparse_device_mesh[dim.value]
         elif dim in self.strategy.data_mesh_dim_names:
             return self.data_device_mesh[dim.value]
         else:
