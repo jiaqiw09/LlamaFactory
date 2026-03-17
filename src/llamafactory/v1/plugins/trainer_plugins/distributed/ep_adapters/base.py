@@ -1,17 +1,25 @@
 from abc import ABC, abstractmethod
 
 import torch.nn as nn
-
-from .....utils.types import HFModel
+from torch.distributed.tensor import DeviceMesh
 
 
 class BaseEPAdapter(ABC):
-    """Abstract base class for expert parallelism model adapters."""
+    """Abstract base class for expert parallelism model adapters.
+
+    Each adapter handles model-specific logic:
+    - Locating MoE blocks and their stacked expert modules
+    - Patching forward methods for EP-compatible token dispatch
+    - Applying ExpertParallel to shard expert parameters
+    """
 
     @staticmethod
     @abstractmethod
     def get_expert_module(module: nn.Module) -> nn.Module | None:
-        """Find the expert module (e.g., MoE block) within a given module."""
+        """Find the stacked expert module within a given module.
+
+        Used by FSDP2 to apply expert-specific sharding.
+        """
         pass
 
     @staticmethod
@@ -22,5 +30,18 @@ class BaseEPAdapter(ABC):
 
     @property
     def permute_backend(self) -> str:
-        """Preferred token permute backend for this model."""
+        """Token permute backend name for this model type."""
         return "default"
+
+    @abstractmethod
+    def prepare_and_apply_ep(self, model: nn.Module, ep_mesh: DeviceMesh) -> int:
+        """Prepare model for EP and apply ExpertParallel.
+
+        This method should:
+        1. Find all MoE blocks in the model
+        2. Patch expert and MoE block forward methods for EP
+        3. Apply ExpertParallel to shard stacked expert parameters
+
+        Returns the number of MoE blocks patched.
+        """
+        pass

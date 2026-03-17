@@ -1,38 +1,21 @@
-from typing import Optional
+from .base import BaseEPAdapter
+from .qwen3_moe import Qwen3MoeEPAdapter
 
 from .....utils.types import HFModel
-from .base import BaseEPAdapter
-from .deepseek_v2 import DeepSeekV2EPAdapter
-from .default import DefaultEPAdapter
-from .mixtral import MixtralEPAdapter
-from .qwen2_moe import Qwen2MoeEPAdapter
 
 
-_EP_ADAPTER_REGISTRY = {
-    "default": DefaultEPAdapter,
-    "qwen2_moe": Qwen2MoeEPAdapter,
-    "mixtral": MixtralEPAdapter,
-    "deepseek_v2": DeepSeekV2EPAdapter,
+_EP_ADAPTER_REGISTRY: dict[str, type[BaseEPAdapter]] = {
+    "qwen3_moe": Qwen3MoeEPAdapter,
 }
 
 
 def _infer_adapter_name(model: HFModel) -> str:
-    """Infer adapter name from model configuration."""
-    model_type = str(getattr(model.config, "model_type", "")).lower()
-    architectures = getattr(model.config, "architectures", None) or []
-    arch_text = " ".join(str(item).lower() for item in architectures)
-    signature = f"{model_type} {arch_text}".strip()
+    """Infer adapter name from model configuration.
 
-    if "mixtral" in signature:
-        return "mixtral"
-    if "deepseek" in signature:
-        return "deepseek_v2"
-    if "qwen" in signature and "moe" in signature:
-        return "qwen2_moe"
-    # Qwen3 MoE uses the same structure as Qwen2 MoE
-    if "qwen3_moe" in signature:
-        return "qwen2_moe"
-    return "default"
+    New HF transformers unifies all MoE models to the same stacked-tensor
+    expert structure (gate_up_proj + down_proj), so a single adapter works.
+    """
+    return "qwen3_moe"
 
 
 def get_ep_adapter(model: HFModel, adapter_name: str = "auto") -> BaseEPAdapter:

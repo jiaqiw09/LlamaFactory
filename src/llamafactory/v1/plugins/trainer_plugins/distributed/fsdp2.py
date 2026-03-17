@@ -25,14 +25,11 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed.tensor.parallel import parallelize_module
-
 from ....accelerator.helper import get_current_accelerator
 from ....accelerator.interface import Dim, DistributedInterface
 from ....utils.logging import get_logger
 from ....utils.types import HFModel, Processor
 from .ep_adapters import get_ep_adapter
-from .expert_parallel import ExpertParallel
 
 
 logger = get_logger(__name__)
@@ -135,21 +132,17 @@ class FSDP2Engine:
             return model
 
         adapter = get_ep_adapter(model, self.ep_model_adapter)
-        patched_experts = set()
-        for _, module in model.named_modules():
-            experts = adapter.get_expert_module(module)
-            if experts is None:
-                continue
-            if id(experts) in patched_experts:
-                continue
-            expert_plan = ExpertParallel(token_permute_backend=adapter.permute_backend)
-            parallelize_module(experts, self.ep_mesh, expert_plan)
-            patched_experts.add(id(experts))
+        num_patched = adapter.prepare_and_apply_ep(model, self.ep_mesh)
 
-        if patched_experts and self.rank == 0:
+        if num_patched > 0 and self.rank == 0:
             logger.info(
-                f"Applied Expert Parallel to {len(patched_experts)} expert modules, "
-                f"adapter={adapter.__class__.__name__}, permute_backend={adapter.permute_backend}."
+                f"Applied Expert Parallel to {num_patched} MoE blocks, "
+                f"adapter={adapter.__class__.__name__}."
+            )
+        elif num_patched == 0 and self.rank == 0:
+            logger.warning(
+                f"EP enabled (ep_size={self.ep_size}) but no MoE blocks found. "
+                f"adapter={adapter.__class__.__name__}."
             )
         return model
 

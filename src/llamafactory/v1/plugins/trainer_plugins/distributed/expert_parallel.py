@@ -107,9 +107,6 @@ class DefaultTokenPermuteBackend(TokenPermuteBackend):
 
 _TOKEN_PERMUTE_BACKENDS: dict[str, Callable[[], TokenPermuteBackend]] = {
     "default": DefaultTokenPermuteBackend,
-    "qwen_moe": DefaultTokenPermuteBackend,
-    "mixtral": DefaultTokenPermuteBackend,
-    "deepseek_v2": DefaultTokenPermuteBackend,
 }
 
 
@@ -118,13 +115,17 @@ def register_token_permute_backend(name: str, factory: Callable[[], TokenPermute
 
 
 def create_token_permute_backend(name: str) -> TokenPermuteBackend:
-    factory = _TOKEN_PERMUTE_BACKENDS.get(name)
-    if factory is None:
-        raise ValueError(f"Unknown token permute backend: {name}")
+    factory = _TOKEN_PERMUTE_BACKENDS.get(name, _TOKEN_PERMUTE_BACKENDS["default"])
     return factory()
 
 
 class ExpertParallel(ParallelStyle):
+    """Distributes expert parameters along dim-0 and adds all-to-all token dispatch/combine.
+
+    Applied to any module with stacked expert weights (e.g. gate_up_proj, down_proj)
+    and a forward(x, num_tokens_per_expert) interface.
+    """
+
     def __init__(self, token_permute_backend: str = "default") -> None:
         super().__init__()
         self.permute_backend = create_token_permute_backend(token_permute_backend)
