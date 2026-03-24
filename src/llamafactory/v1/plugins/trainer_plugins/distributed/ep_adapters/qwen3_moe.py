@@ -46,7 +46,8 @@ def _ep_experts_forward(self, x: Tensor, num_tokens_per_expert: Tensor) -> Tenso
         offset += count
 
     if not outputs:
-        return x.new_empty(0, hidden_size)
+        dummy = (gate_up.sum() * 0.0) + (down.sum() * 0.0)
+        return x + dummy.to(x.dtype)
     return torch.cat(outputs, dim=0)
 
 
