@@ -25,7 +25,7 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from ....accelerator.helper import get_current_accelerator
+from ....accelerator.helper import get_current_accelerator, synchronize
 from ....accelerator.interface import Dim, DistributedInterface
 from ....utils.logging import get_logger
 from ....utils.types import HFModel, Processor
@@ -52,17 +52,74 @@ def get_transformer_layer_cls(model: HFModel) -> type[nn.Module] | None:
 
 
 def save_model(model: HFModel, output_dir: str, processor: Processor) -> None:
-    if DistributedInterface().get_rank() == 0:
-        logger.info("Gathering state dict for saving...")
+    import torch.distributed as dist
+    synchronize()
+    di = DistributedInterface()
+    ep_mesh = di.get_device_mesh(Dim.EP)
+    is_ep_enabled = ep_mesh is not None and ep_mesh.size() > 1
 
-    options = StateDictOptions(full_state_dict=True, cpu_offload=True)
-    state_dict = get_model_state_dict(model, options=options)
+    if is_ep_enabled:
+        rank = di.get_rank()
+        if rank == 0:
+            os.makedirs(output_dir, exist_ok=True)
+            logger.info("MoE + EP detected. Using HuggingFaceStorageWriter for efficient direct HF saving.")
+            
+        import torch.distributed.checkpoint as dcp
+        try:
+            from torch.distributed.checkpoint import HuggingFaceStorageWriter
+            has_hf_writer = True
+        except ImportError:
+            has_hf_writer = False
+            
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+            
+        if has_hf_writer:
+            # Efficient HF streaming save
+            options = StateDictOptions(full_state_dict=False, cpu_offload=True)
+            state_dict = get_model_state_dict(model, options=options)
+            
+            storage_writer = HuggingFaceStorageWriter(
+                path=output_dir,
+                save_distributed=True,
+                enable_consolidation=True,
+            )
+            dcp.save(state_dict=state_dict, storage_writer=storage_writer)
+            
+            if rank == 0:
+                model_to_save = model.module if hasattr(model, "module") else model
+                model_to_save.config.save_pretrained(output_dir)
+                processor.save_pretrained(output_dir, max_shard_size="4GB")
+                logger.info(f"Model directly saved to {output_dir} in HuggingFace safetensors format via streaming.")
+        else:
+            # Fallback to pure DCP
+            dcp_dir = os.path.join(output_dir, "dcp")
+            options = StateDictOptions(full_state_dict=False, cpu_offload=True)
+            state_dict = get_model_state_dict(model, options=options)
+            
+            use_dist = dist.is_available() and dist.is_initialized()
+            dcp.save(state_dict, checkpoint_id=dcp_dir, no_dist=not use_dist)
+            if rank == 0:
+                model_to_save = model.module if hasattr(model, "module") else model
+                model_to_save.config.save_pretrained(output_dir)
+                processor.save_pretrained(output_dir, max_shard_size="4GB")
+                logger.info(f"Model saved to {output_dir} in DCP format (weights under dcp directory). PyTorch version too low for HuggingFaceStorageWriter.")
+                
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+            
+    else:
+        if di.get_rank() == 0:
+            logger.info("Gathering state dict for saving...")
 
-    if DistributedInterface().get_rank() == 0:
-        model_to_save = model.module if hasattr(model, "module") else model
-        model_to_save.save_pretrained(output_dir, state_dict=state_dict, max_shard_size="4GB")
-        processor.save_pretrained(output_dir, max_shard_size="4GB")
-        logger.info(f"Model saved to {output_dir}")
+        options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+        state_dict = get_model_state_dict(model, options=options)
+
+        if di.get_rank() == 0:
+            model_to_save = model.module if hasattr(model, "module") else model
+            model_to_save.save_pretrained(output_dir, state_dict=state_dict, max_shard_size="4GB")
+            processor.save_pretrained(output_dir, max_shard_size="4GB")
+            logger.info(f"Model saved to {output_dir}")
 
 
 class FSDP2Engine:

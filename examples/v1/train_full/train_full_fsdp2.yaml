@@ -1,4 +1,4 @@
-model: Qwen/Qwen3-0.6B
+model: /home/wjq/Qwen3-30B-A3B
 trust_remote_code: true
 model_class: llm
 
@@ -13,10 +13,12 @@ quant_config: null
 dist_config:
   name: fsdp2
   dcp_path: null # /mnt/f/pretrain_models/Qwen3-0.6B-dcp
-  ep_size: 1
+  ep_size: 16
   ep_model_adapter: auto
   ep_permute_backend: default
 
+init_config:
+  name: init_on_meta
 ### data
 train_dataset: data/v1_sft_demo.yaml
 
