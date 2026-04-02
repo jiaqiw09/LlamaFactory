@@ -180,6 +180,7 @@ def pair_converter(raw_sample: PairSample) -> DPOSample:
     def process_message(raw_messages: list[OpenaiMessage]):
         messages = []
         for message in raw_messages:
+            print(f">>>>>>>message={message}", flush=True)
             if message["role"] == "tool":
                 try:
                     tool_calls: ToolCall | list[ToolCall] = json.loads(message["content"])

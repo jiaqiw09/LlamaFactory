@@ -146,7 +146,7 @@ class ModelEngine:
         if self.args.peft_config is None:
             if self.is_train:
                 logger.info_rank0("Fine-tuning mode: full tuning")
-                model = model.to(torch.float32)
+                # model = model.to(torch.float32)
             else:
                 logger.info_rank0("Inference the original model")
         else:
