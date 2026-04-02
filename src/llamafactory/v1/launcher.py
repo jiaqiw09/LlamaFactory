@@ -146,7 +146,9 @@ def launch():
 
             run_sft()
         elif command == "dpo":
-            raise NotImplementedError("DPO trainer is not implemented yet.")
+            #todo dpo: wire the CLI/torchrun entrypoint to llamafactory.v1.trainers.dpo_trainer.run_dpo.
+            from llamafactory.v1.trainers.dpo_trainer import run_dpo
+            run_dpo()
         elif command == "rm":
             raise NotImplementedError("RM trainer is not implemented yet.")
 
@@ -171,9 +173,10 @@ def main():
 
         run_sft()
     elif command == "dpo":
-        # from llamafactory.v1.trainers.dpo_trainer import run_dpo
-        # run_dpo()
-        raise NotImplementedError("DPO trainer is not implemented yet.")
+        #todo dpo: enable the direct trainer entrypoint for `python -m llamafactory.v1.launcher dpo ...`.
+        from llamafactory.v1.trainers.dpo_trainer import run_dpo
+
+        run_dpo()
     elif command == "rm":
         # from llamafactory.v1.trainers.rm_trainer import run_rm
         # run_rm()

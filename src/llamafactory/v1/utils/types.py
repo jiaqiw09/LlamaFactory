@@ -112,6 +112,7 @@ class SFTSample(TypedDict):
 
 
 class DPOSample(TypedDict):
+    #todo dpo: revisit this pairwise sample contract after deciding whether DPO batches stay paired or expand to 2 * batch_size.
     chosen_messages: list[Message]
     """Chosen messages in the sample."""
     rejected_messages: list[Message]
@@ -135,6 +136,7 @@ class ToolCall(TypedDict):
 
 
 class ModelInput(TypedDict, total=False):
+    #todo dpo: adjust model-input typing if chosen/rejected are represented separately instead of a single concatenated sequence.
     input_ids: list[int]
     """Input ids for the model."""
     attention_mask: list[int]
@@ -150,6 +152,7 @@ class ModelInput(TypedDict, total=False):
 
 
 class BatchInput(TypedDict, total=False):
+    #todo dpo: adjust batch typing to match the final DPO collate format and any extra metrics/debug fields.
     input_ids: Tensor
     """Input ids for the model."""
     attention_mask: Tensor

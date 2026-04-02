@@ -186,6 +186,7 @@ class BaseTrainer:
 
         log_probs: Tensor of shape (batch_size, seq_len - 1)
         """
+        #todo dpo: keep or extend this helper for sequence-level chosen/rejected log-prob aggregation.
         batch_size, _ = batch["labels"].shape
         model_inputs = {
             k: v.to(self.device, non_blocking=True) for k, v in batch.items() if isinstance(v, torch.Tensor)
@@ -298,6 +299,7 @@ class BaseTrainer:
                         "grad_norm": grad_norm,
                         "learning_rate": current_lr,
                     }
+                    #todo dpo: allow trainers to inject DPO-specific metrics such as reward margin and pair accuracy.
                     self.callback_handler.on_log(self.args, self.state, logs)
 
                 # Check if max_steps is reached

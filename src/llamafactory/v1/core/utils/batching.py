@@ -44,6 +44,7 @@ logger = logging.get_logger(__name__)
 
 
 def default_collate_fn(buffer: StatefulBuffer, batch_info: BatchInfo) -> list[BatchInput] | None:
+    #todo dpo: add a pairwise collate path here if DPO needs chosen/rejected expansion, masking, or custom padding rules.
     micro_batch_size = batch_info["micro_batch_size"]
     num_micro_batch = batch_info["num_micro_batch"]
     cutoff_len = batch_info["cutoff_len"]
@@ -85,6 +86,7 @@ class BatchGenerator(Iterator):
         self.pin_memory = pin_memory
         self.drop_last = drop_last
         self.seed = seed
+        self._sample_multiplier = self._infer_sample_multiplier()
         # TODO: support length and infinity
         dp_size = DistributedInterface().get_world_size(Dim.DP)
 
@@ -124,6 +126,20 @@ class BatchGenerator(Iterator):
             f"batching strategy {self.batching_strategy}."
         )
 
+    def _infer_sample_multiplier(self) -> int:
+        if len(self.dataset) <= 0:
+            return 1
+
+        try:
+            sample = self.dataset[0]
+        except Exception:
+            return 1
+
+        if isinstance(sample, dict) and "chosen_messages" in sample and "rejected_messages" in sample:
+            return 2
+
+        return 1
+
     def _init_data_provider(self) -> None:
         if len(self.dataset) != -1:
             sampler = StatefulDistributedSampler(
@@ -140,9 +156,16 @@ class BatchGenerator(Iterator):
         generato_seed = torch.Generator()
         generato_seed.manual_seed(self.seed)
 
+        data_batch_size = self.micro_batch_size * self.num_micro_batch
+        if data_batch_size % self._sample_multiplier != 0:
+            raise ValueError(
+                "Batch size must be divisible by the DPO sample expansion factor. "
+                f"Got {data_batch_size} % {self._sample_multiplier} != 0."
+            )
+
         self._data_provider = StatefulDataLoader(
             self.dataset,
-            batch_size=self.micro_batch_size * self.num_micro_batch,
+            batch_size=data_batch_size // self._sample_multiplier,
             sampler=sampler,
             num_workers=self.batching_workers,
             collate_fn=self.renderer.process_samples,

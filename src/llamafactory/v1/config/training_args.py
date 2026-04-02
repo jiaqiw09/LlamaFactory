@@ -89,6 +89,22 @@ class TrainingArguments:
         default=1,
         metadata={"help": "Log metrics every N optimizer steps."},
     )
+    dpo_beta: float = field(
+        default=0.1,
+        metadata={"help": "Beta coefficient used in DPO loss."},
+    )
+    dpo_use_ref_model: bool = field(
+        default=True,
+        metadata={"help": "Whether to use a reference model in DPO training."},
+    )
+    dpo_ref_model: str | None = field(
+        default=None,
+        metadata={"help": "Optional path or HF identifier of the reference model used in DPO training."},
+    )
+    dpo_label_smoothing: float = field(
+        default=0.0,
+        metadata={"help": "Optional label smoothing for DPO loss."},
+    )
 
     def __post_init__(self) -> None:
         self.dist_config = get_plugin_config(self.dist_config)
