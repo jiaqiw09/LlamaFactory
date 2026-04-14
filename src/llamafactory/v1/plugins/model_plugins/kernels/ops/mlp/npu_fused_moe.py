@@ -282,6 +282,175 @@ class Qwen3NpuMoeFused:
         return next_states, router_logits
 
 
+class BatchedListGmmFunction(torch.autograd.Function):
+    r"""Batched List mode GMM for large number of experts.
+
+    Splits experts into batches (each batch <= 120) and uses efficient List mode
+    (zero-copy) for each batch.
+    """
+
+    BATCH_SIZE = 120
+
+    @staticmethod
+    def forward(ctx, num_experts, *args):
+        r"""Forward pass for batched list GMM.
+
+        Args:
+            ctx: Context object to save tensors for backward pass.
+            num_experts (int): Number of experts.
+            *args: Variable length argument list containing inputs and weights.
+
+        Returns:
+            tuple: The outputs of the grouped matrix multiplication.
+        """
+        x_list = list(args[:num_experts])
+        weight_list = list(args[num_experts:])
+
+        ctx.num_experts = num_experts
+        ctx.split_sizes = [x.shape[0] for x in x_list]
+        ctx.save_for_backward(*args)
+
+        all_outputs = []
+        batch_size = BatchedListGmmFunction.BATCH_SIZE
+
+        for i in range(0, num_experts, batch_size):
+            end_idx = min(i + batch_size, num_experts)
+            x_batch = x_list[i:end_idx]
+            w_batch = weight_list[i:end_idx]
+            outputs_batch = torch_npu.npu_grouped_matmul(
+                x_batch, w_batch, bias=None, group_list=None, split_item=0, group_type=-1
+            )
+            all_outputs.extend(outputs_batch)
+
+        return tuple(all_outputs)
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        r"""Backward pass for batched list GMM.
+
+        Args:
+            ctx: Context object containing saved tensors.
+            *grad_outputs: Gradients with respect to the outputs.
+
+        Returns:
+            tuple: Gradients with respect to inputs and weights.
+        """
+        saved_tensors = ctx.saved_tensors
+        num_experts = ctx.num_experts
+
+        x_list = list(saved_tensors[:num_experts])
+        weight_list = list(saved_tensors[num_experts:])
+        grad_outputs = [g.contiguous() for g in grad_outputs]
+
+        batch_size = BatchedListGmmFunction.BATCH_SIZE
+
+        all_grad_x = []
+        for i in range(0, num_experts, batch_size):
+            end_idx = min(i + batch_size, num_experts)
+            gy_batch = grad_outputs[i:end_idx]
+            w_batch = weight_list[i:end_idx]
+            w_t_batch = [w.t() for w in w_batch]
+            grad_x_batch = torch_npu.npu_grouped_matmul(
+                gy_batch, w_t_batch, bias=None, group_list=None, split_item=0, group_type=-1
+            )
+            all_grad_x.extend(grad_x_batch)
+
+        all_grad_w = []
+        for i in range(0, num_experts, batch_size):
+            end_idx = min(i + batch_size, num_experts)
+            x_batch = x_list[i:end_idx]
+            gy_batch = grad_outputs[i:end_idx]
+            for x, gy in zip(x_batch, gy_batch):
+                grad_w = torch.matmul(x.t(), gy)
+                all_grad_w.append(grad_w)
+
+        return (None, *all_grad_x, *all_grad_w)
+
+
+def npu_batched_list_group_gemm(x_list, weight_list):
+    r"""Wrapper function for batched list GMM.
+
+    Args:
+        x_list (list): List of input tensors.
+        weight_list (list): List of weight tensors.
+
+    Returns:
+        tuple: The outputs of the grouped matrix multiplication.
+    """
+    num_experts = len(x_list)
+    return BatchedListGmmFunction.apply(num_experts, *x_list, *weight_list)
+
+
+class Qwen3NextNpuMoeFused:
+    r"""Container for Qwen3Next NPU fused MoE forward functions."""
+
+    @staticmethod
+    def qwen3next_sparse_moe_block_forward(self, hidden_states: torch.Tensor):
+        r"""Forward pass for Qwen3Next sparse MoE block using NPU fused operations.
+
+        Args:
+            self: The Qwen3Next MoE block instance.
+            hidden_states (Tensor): Input hidden states.
+
+        Returns:
+            tuple: A tuple containing the final hidden states and router logits.
+        """
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        router_logits = self.gate(hidden_states)
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+
+        if self.norm_topk_prob:
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        permuted_hidden_states, row_ids_map = torch_npu.npu_moe_token_permute(
+            hidden_states, selected_experts.int()
+        )
+
+        tokens_per_expert = torch.histc(
+            selected_experts.float(), bins=self.num_experts, min=0, max=self.num_experts
+        ).long()
+        split_sizes = tokens_per_expert.tolist()
+
+        input_list = list(torch.split(permuted_hidden_states, split_sizes, dim=0))
+
+        use_swiglu = self.experts[0].config.hidden_act == "silu"
+
+        if use_swiglu:
+            fused_gate_up_weights = [
+                torch.cat([e.gate_proj.weight.t(), e.up_proj.weight.t()], dim=-1) for e in self.experts
+            ]
+            fused_out_tuple = npu_batched_list_group_gemm(input_list, fused_gate_up_weights)
+            inter_list = [torch_npu.npu_swiglu(fused, dim=-1) for fused in fused_out_tuple]
+        else:
+            gate_weights = [e.gate_proj.weight.t() for e in self.experts]
+            up_weights = [e.up_proj.weight.t() for e in self.experts]
+            gate_out_tuple = npu_batched_list_group_gemm(input_list, gate_weights)
+            up_out_tuple = npu_batched_list_group_gemm(input_list, up_weights)
+            act_fn = F.silu
+            inter_list = [act_fn(g) * u for g, u in zip(gate_out_tuple, up_out_tuple)]
+
+        down_weights = [e.down_proj.weight.t() for e in self.experts]
+        down_out_tuple = npu_batched_list_group_gemm(inter_list, down_weights)
+
+        grouped_output = torch.cat(down_out_tuple, dim=0)
+
+        routed_expert_output = torch_npu.npu_moe_token_unpermute(
+            grouped_output, row_ids_map, probs=routing_weights
+        )
+
+        shared_expert_output = self.shared_expert(hidden_states)
+        shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+
+        final_hidden_states = routed_expert_output + shared_expert_output
+        final_hidden_states = final_hidden_states.view(batch_size, sequence_length, -1)
+
+        return final_hidden_states, router_logits
+
+
 # moe patch config mapping
 kernel_moe_mapping = {
     "Qwen3VLMoeForConditionalGeneration": {
@@ -293,6 +462,9 @@ kernel_moe_mapping = {
 if not is_transformers_version_greater_than("5.0.0"):
     kernel_moe_mapping["Qwen3MoeForCausalLM"] = {
         "Qwen3MoeSparseMoeBlock": Qwen3NpuMoeFused.qwen3moe_sparse_moe_block_forward
+    }
+    kernel_moe_mapping["Qwen3NextForCausalLM"] = {
+        "Qwen3NextSparseMoeBlock": Qwen3NextNpuMoeFused.qwen3next_sparse_moe_block_forward
     }
 
 

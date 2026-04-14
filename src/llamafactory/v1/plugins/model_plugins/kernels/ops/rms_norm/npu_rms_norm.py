@@ -57,6 +57,7 @@ class NpuRMSNormKernel(BaseKernel):
 
         Key points:
         - Match modules whose class name contains "RMSNorm" (case-insensitive).
+        - Skip Qwen3Next model due to its special RMSNormGated implementation.
         - Bind `_npu_rms_forward` as an instance method via `types.MethodType` to
           replace the original `forward`.
         - Do not modify weights, hyperparameters, or module structure to ensure
@@ -78,13 +79,15 @@ class NpuRMSNormKernel(BaseKernel):
 
         if not cls.check_deps():
             raise RuntimeError(f"torch_npu is not available but {cls.__name__} was called.")
+
+        archs = getattr(model.config, "architectures", [])
+        if "Qwen3NextForCausalLM" in archs:
+            return model
+
         rms_norm_pattern = re.compile("RMSNorm", re.IGNORECASE)
 
         for name, module in model.named_modules():
-            # Match any module whose class name contains "RMSNorm"
             if re.search(rms_norm_pattern, module.__class__.__name__):
-                # Bind function as an instance method to preserve `self` semantics
-                # and replace the original forward
                 module.forward = types.MethodType(npu_rms_norm_forward, module)
 
         return model

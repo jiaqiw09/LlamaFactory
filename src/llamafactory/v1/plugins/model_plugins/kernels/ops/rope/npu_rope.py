@@ -118,6 +118,11 @@ class NpuRoPEKernel(BaseKernel):
         model = kwargs.get("model", None)
         if model is None:
             raise ValueError(f"HFModel instance is required for {cls.__name__}.")
+
+        archs = getattr(model.config, "architectures", [])
+        if "Qwen3NextForCausalLM" in archs:
+            return model
+
         _modules = set()
         for module in model.modules():
             if "Attention" in module.__class__.__name__:
