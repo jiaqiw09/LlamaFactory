@@ -80,6 +80,18 @@ class DistributedConfig(TypedDict, total=False):
     """Data parallel size, default to world_size // cp_size."""
     cp_size: NotRequired[int]
     """Context parallel size, default to 1."""
+    ep_size: NotRequired[int]
+    """Expert parallel size, default to 1."""
+    ep_dispatcher: NotRequired[str]
+    """MindSpeed Lite EP dispatcher, e.g. eager/fused/mc2."""
+    ep_modules: NotRequired[list[str]]
+    """Module name patterns to apply expert parallelism."""
+    ep_fsdp_modules: NotRequired[list[str]]
+    """Module name patterns to apply MindSpeed Lite expert fully sharding."""
+    fsdp_modules: NotRequired[dict[str, dict[str, Any]]]
+    """Module name patterns to apply FSDP2 wrapping."""
+    fsdp_ignored_modules: NotRequired[list[str]]
+    """Module name patterns to exclude from FSDP2 wrapping."""
     timeout: NotRequired[int]
     """Timeout for distributed communication, default to 600."""
 

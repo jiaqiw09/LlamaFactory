@@ -91,6 +91,7 @@ class UlyssesAttention(torch.nn.Module):
         deterministic=False,
         target_dtype=None,
         *args: Any,
+        **kwargs: Any,
     ) -> Tensor:
         """Forward.
 
@@ -150,6 +151,7 @@ class UlyssesAttention(torch.nn.Module):
             softmax_scale=softmax_scale,
             deterministic=deterministic,
             target_dtype=target_dtype,
+            **kwargs,
         )
 
         if isinstance(context_layer, tuple):

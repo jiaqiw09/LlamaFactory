@@ -1,0 +1,30 @@
+model: /home/wjq/Qwen3-30B-A3B
+trust_remote_code: true
+model_class: llm
+
+template: qwen3_nothink
+
+dist_config:
+  name: mindspeed_fsdp2
+  ep_size: 2
+  ep_fsdp_size: 1
+  cp_size: 2
+  cp_mode: ulysses
+
+init_config:
+  name: init_on_meta
+
+### data
+train_dataset: data/v1_sft_demo.yaml
+
+### training
+output_dir: outputs/test_qwen3_moe_mindspeed_ep_fsdp
+micro_batch_size: 1
+cutoff_len: 2048
+learning_rate: 1.0e-4
+bf16: false
+max_steps: 10
+
+### sample
+sample_backend: hf
+max_new_tokens: 128

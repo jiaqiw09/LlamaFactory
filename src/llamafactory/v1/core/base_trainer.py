@@ -28,9 +28,11 @@ Train Phase:
 """
 
 from abc import abstractmethod
+import math
 
 import torch
 import torch.nn.functional as F
+from torch.distributed._tensor import DTensor
 
 from ..accelerator.helper import ReduceOp
 from ..accelerator.interface import Dim, DistributedInterface
@@ -246,23 +248,17 @@ class BaseTrainer:
                     # deepspeed: engine.step() already ran inside backward at the sync boundary
                     grad_norm = self._deepspeed_engine.get_grad_norm()
                 else:
-                    if self.args.dist_config and self.args.dist_config.get("cp_size", 1) > 1:
-                        from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
+                    dist_name = self.args.dist_config.name if self.args.dist_config else None
+                    if dist_name in ("fsdp2", "mindspeed_fsdp2"):
+                        from ..plugins.trainer_plugins.distributed.hub import DistributedPlugin
 
-                        parameters = self.model.parameters()
-                        if isinstance(parameters, torch.Tensor):
-                            parameters = [parameters]
-                        else:
-                            parameters = list(parameters)
-                        grads = [p.grad for p in parameters if p.grad is not None]
-                        grad_norm = _get_total_norm(grads)
-                        grad_norm = grad_norm.to(self.device)
-                        _clip_grads_with_norm_(parameters, self.args.max_grad_norm, grad_norm)
-                        if isinstance(grad_norm, torch.distributed._tensor.DTensor):
-                            grad_norm = grad_norm.full_tensor().item()
+                        grad_norm = DistributedPlugin(dist_name).clip_grad_norm(
+                            self.model, self.args.max_grad_norm
+                        )
                     else:
+                        parameters = [p for p in self.model.parameters() if p.grad is not None]
                         grad_norm = torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), self.args.max_grad_norm
+                            parameters, self.args.max_grad_norm
                         ).item()
 
                     # isfinite(): argument 'input' (position 1) must be Tensor, not float
@@ -313,7 +309,11 @@ class BaseTrainer:
 
     def save_model(self) -> None:
         """Save the model."""
-        if self.args.dist_config is not None and self.args.dist_config.name in ("deepspeed", "fsdp2"):
+        if self.args.dist_config is not None and self.args.dist_config.name in (
+            "deepspeed",
+            "fsdp2",
+            "mindspeed_fsdp2",
+        ):
             from ..plugins.trainer_plugins.distributed.hub import DistributedPlugin
 
             DistributedPlugin(self.args.dist_config.name).save_model(

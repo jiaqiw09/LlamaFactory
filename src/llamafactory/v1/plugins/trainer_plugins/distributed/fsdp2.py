@@ -35,6 +35,14 @@ from ....utils.types import HFModel, Processor
 
 logger = get_logger(__name__)
 
+def _dot_natural_key(name: str):
+    parts = []
+    for part in name.split("."):
+        if part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((1, part))
+    return parts
 
 def get_transformer_layer_cls(model: HFModel) -> type[nn.Module] | None:
     no_split_modules = getattr(model, "_no_split_modules", None)
@@ -66,6 +74,36 @@ def save_model(model: HFModel, output_dir: str, processor: Processor) -> None:
         logger.info(f"Model saved to {output_dir}")
 
 
+def clip_grad_norm_(model: HFModel, max_norm: float, **kwargs) -> float:
+    import torch
+    from torch.nn.utils import get_total_norm
+    from torch.distributed._tensor import DTensor
+
+    dist_interface = DistributedInterface()
+    cp_size = getattr(dist_interface.strategy, "cp_size", 1)
+
+    parameters = [p for p in model.parameters() if p.grad is not None]
+    if not parameters:
+        return 0.0
+
+    grads = [p.grad for p in parameters]
+    total_norm = get_total_norm(grads, 2.0)
+    if isinstance(total_norm, DTensor):
+        total_norm = total_norm.full_tensor()
+
+    if cp_size > 1:
+        total_norm = total_norm * cp_size
+
+    total_norm_val = float(total_norm.item())
+    clip_coef = min(max_norm / (total_norm_val + 1e-6), 1.0)
+
+    if clip_coef < 1.0:
+        for grad in grads:
+            grad.detach().mul_(clip_coef)
+
+    return total_norm_val
+
+
 class FSDP2Engine:
     def __init__(self, dist_config: dict):
         self.dist_interface = DistributedInterface()
@@ -85,11 +123,32 @@ class FSDP2Engine:
             )
 
         if self.device_mesh is not None:
-            self.fsdp_mesh = self.device_mesh
+            try:
+                self.fsdp_mesh = self.device_mesh["dp"]
+            except Exception:
+                self.fsdp_mesh = self.device_mesh
 
             logger.info(f"Using Device Mesh: {self.fsdp_mesh}")
         else:
             self.fsdp_mesh = None
+
+    def _get_buffer_sync_group(self):
+        """Return a process group suitable for syncing rank-0-owned Python objects.
+
+        `broadcast_object_list` needs a single ProcessGroup. When FSDP runs on a
+        multidimensional DeviceMesh (for example after enabling context
+        parallelism), `DeviceMesh.get_group()` requires an explicit `mesh_dim`.
+        For non-persistent buffers we want rank 0 to fan out the same metadata to
+        every rank, so the default world group is the safest choice in the
+        multidimensional case.
+        """
+        if self.fsdp_mesh is None:
+            return None
+
+        if self.fsdp_mesh.ndim == 1:
+            return self.fsdp_mesh.get_group()
+
+        return None
 
     def get_mp_policy(self) -> MixedPrecisionPolicy:
         if self.mixed_precision == "bf16":
@@ -111,7 +170,7 @@ class FSDP2Engine:
     def is_lora_module_wrap(self, model) -> bool:
         return any(isinstance(module, LoraLayer) for module in model.modules())
 
-    def prepare_model(self, model: HFModel) -> HFModel:
+    def prepare_model(self, model: HFModel, ignored_params: set = None) -> HFModel:
         if self.fsdp_mesh is None:
             logger.warning("No FSDP Mesh available, skipping FSDP wrapping.")
             return model
@@ -128,6 +187,15 @@ class FSDP2Engine:
             logger.info(f"Applying per-layer FSDP to {layer_cls.__name__}")
             transformer_layer_cls_to_wrap = {layer_cls}
 
+        fsdp_kwargs = {
+            "mesh": self.fsdp_mesh,
+            "reshard_after_forward": self.reshard_after_forward,
+            "mp_policy": mp_policy,
+            "offload_policy": CPUOffloadPolicy(pin_memory=self.pin_memory) if self.offload_params else None,
+        }
+        if ignored_params:
+            fsdp_kwargs["ignored_params"] = ignored_params
+
         if self.is_lora_module_wrap(model):
             lora_modules = []
             for module in model.modules():
@@ -137,13 +205,7 @@ class FSDP2Engine:
                     lora_modules.append(module)
 
             for module in lora_modules:
-                fully_shard(
-                    module,
-                    mesh=self.fsdp_mesh,
-                    reshard_after_forward=self.reshard_after_forward,
-                    mp_policy=mp_policy,
-                    offload_policy=CPUOffloadPolicy(pin_memory=self.pin_memory) if self.offload_params else None,
-                )
+                fully_shard(module, **fsdp_kwargs)
 
             logger.info("Applying FSDP wrap for LoRA layer separately.")
 
@@ -157,13 +219,7 @@ class FSDP2Engine:
                     should_wrap = True
 
             if should_wrap:
-                fully_shard(
-                    module,
-                    mesh=self.fsdp_mesh,
-                    reshard_after_forward=self.reshard_after_forward,
-                    mp_policy=mp_policy,
-                    offload_policy=CPUOffloadPolicy(pin_memory=self.pin_memory) if self.offload_params else None,
-                )
+                fully_shard(module, **fsdp_kwargs)
 
         # BaseTrainer is the single source of truth for gradient checkpointing.
         # FSDP2 only applies the input-grad compatibility hook when checkpointing is already enabled.
@@ -180,13 +236,7 @@ class FSDP2Engine:
 
                 model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
-        fully_shard(
-            model,
-            mesh=self.fsdp_mesh,
-            reshard_after_forward=self.reshard_after_forward,
-            mp_policy=mp_policy,
-            offload_policy=CPUOffloadPolicy(pin_memory=self.pin_memory) if self.offload_params else None,
-        )
+        fully_shard(model, **fsdp_kwargs)
 
         return model
 
@@ -269,7 +319,8 @@ class FSDP2Engine:
 
             # Broadcast and restore non-persistent buffers
             buffers_to_sync = [saved_buffers]
-            dist.broadcast_object_list(buffers_to_sync, src=0, group=self.fsdp_mesh.get_group())
+            dist.broadcast_object_list(buffers_to_sync, src=0, group=self._get_buffer_sync_group())
+            # dist.broadcast_object_list(buffers_to_sync, src=0, group=self.fsdp_mesh.get_group())
             self._restore_non_persistent_buffers(model, buffers_to_sync[0])
 
             if self.rank == 0:
@@ -314,6 +365,29 @@ class FSDP2Engine:
             logger.error(f"Failed to load from DCP: {e}")
             raise e
 
+    def _try_build_hf_weight_conversion_context(self, model: HFModel) -> dict | None:
+        try:
+            from transformers.conversion_mapping import get_model_conversion_mapping
+            from transformers.core_model_loading import WeightConverter, WeightRenaming, rename_source_key
+        except ImportError:
+            return None
+
+        weight_mapping = get_model_conversion_mapping(model)
+        if not weight_mapping:
+            return None
+
+        renamings = [entry for entry in weight_mapping if isinstance(entry, WeightRenaming)]
+        converters = [entry for entry in weight_mapping if isinstance(entry, WeightConverter)]
+        return {
+            "prefix": getattr(model, "base_model_prefix", ""),
+            "meta_state_dict": model.state_dict(),
+            "rename_source_key": rename_source_key,
+            "renamings": renamings,
+            "converters": converters,
+            "converter_templates": {pattern: converter for converter in converters for pattern in converter.source_patterns},
+            "pending_converters": {},
+        }
+
     def _load_weights_from_hf_checkpoint(self, model: HFModel, hf_model_path: str):
         import glob
         import json
@@ -355,6 +429,7 @@ class FSDP2Engine:
             raise ValueError(f"No checkpoint files found in {hf_model_path}")
 
         param_map = dict(model.named_parameters())
+        conversion_ctx = self._try_build_hf_weight_conversion_context(model)
         total_files = len(checkpoint_files)
 
         for i, ckpt_file in enumerate(checkpoint_files):
@@ -365,17 +440,60 @@ class FSDP2Engine:
                 from safetensors import safe_open
 
                 with safe_open(ckpt_file, framework="pt", device="cpu") as f:
-                    for key in f.keys():
-                        if key in param_map:
-                            tensor = f.get_tensor(key)
-                            self._copy_weights(param_map[key], tensor)
+                    for key in sorted(f.keys(), key=_dot_natural_key):
+                        tensor = f.get_tensor(key)
+                        renamed_key = key
+                        source_pattern = None
+                        if conversion_ctx is not None:
+                            renamed_key, source_pattern = conversion_ctx["rename_source_key"](
+                                key,
+                                conversion_ctx["renamings"],
+                                conversion_ctx["converters"],
+                                prefix=conversion_ctx["prefix"],
+                                meta_state_dict=conversion_ctx["meta_state_dict"],
+                            )
+
+                        if source_pattern is not None:
+                            template = conversion_ctx["converter_templates"][source_pattern]
+                            converter = conversion_ctx["pending_converters"].setdefault(
+                                renamed_key, copy.deepcopy(template)
+                            )
+                            converter.add_tensor(renamed_key, key, source_pattern, tensor)
+                        elif renamed_key in param_map:
+                            self._copy_weights(param_map[renamed_key], tensor)
             else:
                 state_dict = torch.load(ckpt_file, map_location="cpu")
-                for key, tensor in state_dict.items():
-                    if key in param_map:
-                        self._copy_weights(param_map[key], tensor)
+                for key, tensor in sorted(state_dict.items(), key=lambda item: _dot_natural_key(item[0])):
+                    renamed_key = key
+                    source_pattern = None
+                    if conversion_ctx is not None:
+                        renamed_key, source_pattern = conversion_ctx["rename_source_key"](
+                            key,
+                            conversion_ctx["renamings"],
+                            conversion_ctx["converters"],
+                            prefix=conversion_ctx["prefix"],
+                            meta_state_dict=conversion_ctx["meta_state_dict"],
+                        )
+
+                    if source_pattern is not None:
+                        template = conversion_ctx["converter_templates"][source_pattern]
+                        converter = conversion_ctx["pending_converters"].setdefault(
+                            renamed_key, copy.deepcopy(template)
+                        )
+                        converter.add_tensor(renamed_key, key, source_pattern, tensor)
+                    elif renamed_key in param_map:
+                        self._copy_weights(param_map[renamed_key], tensor)
                 del state_dict
                 gc.collect()
+
+        if conversion_ctx is not None:
+            for layer_name, converter in sorted(conversion_ctx["pending_converters"].items()):
+                realized_tensors = converter.convert(layer_name, model=model, config=model.config)
+                for target_name, tensor in realized_tensors.items():
+                    if isinstance(tensor, list):
+                        tensor = tensor[0]
+                    if target_name in param_map:
+                        self._copy_weights(param_map[target_name], tensor)
 
     def _resolve_hf_checkpoint_dir(self, hf_model_path: str) -> str:
         """Resolve a HF model identifier or local path to a local directory containing checkpoint files.
@@ -483,12 +601,12 @@ class FSDP2Engine:
             if shard_placement is None:
                 local_tensor.copy_(loaded_tensor)
             else:
-                dim = shard_placement.dim
                 mesh = param.device_mesh
                 my_coordinate = mesh.get_coordinate()
                 if my_coordinate is None:
                     return
 
+                dim = shard_placement.dim
                 rank_in_dim = my_coordinate[mesh_dim]
                 world_size_in_dim = mesh.size(mesh_dim)
 
