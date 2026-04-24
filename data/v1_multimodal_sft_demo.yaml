@@ -1,0 +1,4 @@
+qwen3_5_image_demo:
+  path: data/v1_multimodal_sft_demo.jsonl
+  source: local
+  size: 40

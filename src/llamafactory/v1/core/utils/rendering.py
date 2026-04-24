@@ -25,6 +25,7 @@ import numpy as np
 
 from ...utils.constants import IGNORE_INDEX
 from ...utils.helper import get_tokenizer
+from ...utils.multimodal import MULTIMODAL_REF_KEYS
 from ...utils.types import Message, ModelInput, Processor, Sample
 
 
@@ -160,6 +161,11 @@ class Renderer:
                     loss_weights=chosen_input["loss_weights"] + rejected_input["loss_weights"],
                     token_type_ids=chosen_input["token_type_ids"] + rejected_input["token_type_ids"],
                 )
+                for key in MULTIMODAL_REF_KEYS:
+                    merged_refs = chosen_input.get(key, []) + rejected_input.get(key, [])
+                    if len(merged_refs) != 0:
+                        model_input[key] = merged_refs
+
                 if "position_ids" in chosen_input:
                     model_input["position_ids"] = np.concatenate(
                         [chosen_input["position_ids"], rejected_input["position_ids"]], axis=-1

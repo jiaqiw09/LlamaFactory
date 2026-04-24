@@ -24,6 +24,7 @@ from transformers import AsyncTextIteratorStreamer
 from ...accelerator.interface import DistributedInterface
 from ...config import ModelArguments, SampleArguments
 from ...utils.helper import get_tokenizer
+from ...utils.multimodal import build_multimodal_tensors, split_model_input
 from ...utils.types import HFModel, Message, Sample, TorchDataset
 from .rendering import Renderer
 
@@ -91,6 +92,7 @@ class HuggingFaceEngine(BaseEngine):
     async def generate(self, messages: list[Message], tools: str | None = None) -> AsyncGenerator[str, None]:
         async with self.semaphore:
             model_inputs = self.renderer.render_messages(messages, tools, is_generate=True)
+            text_inputs, multimodal_inputs = split_model_input(model_inputs)
             streamer = AsyncTextIteratorStreamer(
                 tokenizer=get_tokenizer(self.renderer.processor),
                 skip_prompt=True,
@@ -98,11 +100,14 @@ class HuggingFaceEngine(BaseEngine):
             )
             device = DistributedInterface().current_device
             kwargs = {
-                "input_ids": torch.tensor([model_inputs["input_ids"]]).to(device),
-                "attention_mask": torch.tensor([model_inputs["attention_mask"]]).to(device),
+                "input_ids": torch.tensor([text_inputs["input_ids"]]).to(device),
+                "attention_mask": torch.tensor([text_inputs["attention_mask"]]).to(device),
                 "max_new_tokens": self.args.max_new_tokens,
                 "streamer": streamer,
             }
+            for key, value in build_multimodal_tensors(self.renderer.processor, [multimodal_inputs]).items():
+                kwargs[key] = value.to(device) if torch.is_tensor(value) else value
+
             thread = Thread(target=self.model.generate, kwargs=kwargs, daemon=True)
             thread.start()
 

@@ -28,6 +28,7 @@ Train Phase:
 """
 
 from abc import abstractmethod
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -87,7 +88,11 @@ class BaseTrainer:
             self.args.save_steps = max(1, int(steps_per_epoch * self.args.save_epochs))
 
         if self.args.enable_activation_checkpointing:
-            self.model.gradient_checkpointing_enable({"use_reentrant": False})
+            checkpoint_kwargs = {"use_reentrant": False}
+            if self.args.bf16:
+                checkpoint_kwargs["context_fn"] = self._gradient_checkpointing_context_fn
+
+            self.model.gradient_checkpointing_enable(checkpoint_kwargs)
 
         self._deepspeed_engine = None
         dist_name = self.args.dist_config.name if self.args.dist_config is not None else None
@@ -201,6 +206,15 @@ class BaseTrainer:
             self.lr_scheduler = LRSchedulerPlugin(self.args.lr_scheduler_config.name)(
                 self.optimizer, self.num_training_steps, self.args.lr_scheduler_config
             )
+
+    def _gradient_checkpointing_context_fn(self):
+        if self.args.bf16:
+            return (
+                torch.autocast(device_type=self.device.type, dtype=torch.bfloat16),
+                torch.autocast(device_type=self.device.type, dtype=torch.bfloat16),
+            )
+
+        return nullcontext(), nullcontext()
 
     def compute_log_probs(self, model: HFModel, batch: BatchInput) -> Tensor:
         """Compute log probs.

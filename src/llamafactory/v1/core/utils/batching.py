@@ -35,6 +35,7 @@ from ...accelerator.interface import Dim, DistributedInterface
 from ...config import BatchingStrategy
 from ...utils import logging
 from ...utils.helper import pad_and_truncate
+from ...utils.multimodal import build_multimodal_tensors, split_model_input
 from ...utils.objects import StatefulBuffer
 from ...utils.types import BatchInfo, BatchInput, ModelInput, TorchDataset
 from .rendering import Renderer
@@ -55,7 +56,10 @@ def default_collate_fn(buffer: StatefulBuffer, batch_info: BatchInfo) -> list[Ba
     batch = []
     for i in range(num_micro_batch):
         micro_batch = samples[i * micro_batch_size : (i + 1) * micro_batch_size]
-        batch.append(default_collate(pad_and_truncate(micro_batch, cutoff_len)))
+        text_inputs, multimodal_inputs = zip(*(split_model_input(sample) for sample in micro_batch), strict=False)
+        collated_batch = default_collate(pad_and_truncate(list(text_inputs), cutoff_len))
+        collated_batch.update(build_multimodal_tensors(batch_info["processor"], multimodal_inputs))
+        batch.append(collated_batch)
 
     return batch
 
@@ -112,6 +116,7 @@ class BatchGenerator(Iterator):
             "micro_batch_size": self.micro_batch_size,
             "num_micro_batch": self.num_micro_batch,
             "cutoff_len": self.cutoff_len,
+            "processor": self.renderer.processor,
             "data_iter": self._data_iter,
         }
 

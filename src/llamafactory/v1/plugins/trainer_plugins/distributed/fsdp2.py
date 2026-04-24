@@ -43,20 +43,42 @@ from ....utils.types import HFModel, Processor
 logger = get_logger(__name__)
 
 
-def get_transformer_layer_cls(model: HFModel) -> type[nn.Module] | None:
+def _add_layer_cls(layer_classes: set[type[nn.Module]], module: nn.Module | None) -> None:
+    if module is not None:
+        layer_classes.add(type(module))
+
+
+def _add_first_layer_cls(layer_classes: set[type[nn.Module]], layers: nn.ModuleList | list[nn.Module] | None) -> None:
+    if layers is not None and len(layers) > 0:
+        _add_layer_cls(layer_classes, layers[0])
+
+
+def get_transformer_layer_classes(model: HFModel) -> set[type[nn.Module]]:
+    layer_classes: set[type[nn.Module]] = set()
     no_split_modules = getattr(model, "_no_split_modules", None)
     if no_split_modules:
-        if isinstance(no_split_modules, (list, tuple)):
-            for name, module in model.named_modules():
+        if isinstance(no_split_modules, str):
+            no_split_modules = (no_split_modules,)
+
+        if isinstance(no_split_modules, (list, tuple, set)):
+            for _, module in model.named_modules():
                 for cls_name in no_split_modules:
                     if module.__class__.__name__ == cls_name:
-                        return module.__class__
-    if hasattr(model, "model") and hasattr(model.model, "layers"):
-        return type(model.model.layers[0])
-    if hasattr(model, "layers"):
-        return type(model.layers[0])
+                        layer_classes.add(module.__class__)
 
-    return None
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        _add_first_layer_cls(layer_classes, model.model.layers)
+
+    if hasattr(model, "layers"):
+        _add_first_layer_cls(layer_classes, model.layers)
+
+    # Multimodal models can have a separate vision transformer stack.
+    for parent in (model, getattr(model, "model", None)):
+        visual = getattr(parent, "visual", None)
+        if visual is not None and hasattr(visual, "blocks"):
+            _add_first_layer_cls(layer_classes, visual.blocks)
+
+    return layer_classes
 
 
 def save_model(model: HFModel, output_dir: str, processor: Processor) -> None:
@@ -166,16 +188,15 @@ class FSDP2Engine:
             return model
 
         mp_policy = self.get_mp_policy()
-        layer_cls = get_transformer_layer_cls(model)
+        transformer_layer_cls_to_wrap = get_transformer_layer_classes(model)
 
-        if layer_cls is None:
+        if len(transformer_layer_cls_to_wrap) == 0:
             logger.warning(
                 "Could not identify Transformer Layer class, applying FSDP to the whole model structure only."
             )
-            transformer_layer_cls_to_wrap = set()
         else:
-            logger.info(f"Applying per-layer FSDP to {layer_cls.__name__}")
-            transformer_layer_cls_to_wrap = {layer_cls}
+            layer_names = ", ".join(sorted(layer_cls.__name__ for layer_cls in transformer_layer_cls_to_wrap))
+            logger.info(f"Applying per-layer FSDP to {layer_names}")
 
         if self.is_lora_module_wrap(model):
             lora_modules = []

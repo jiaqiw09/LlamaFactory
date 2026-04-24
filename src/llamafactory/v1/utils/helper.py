@@ -22,6 +22,9 @@ from .constants import IGNORE_INDEX
 from .types import BatchInput, ModelInput, Processor, Tensor
 
 
+RAW_MODEL_INPUT_KEYS = {"images"}
+
+
 def set_seed(seed: int) -> None:
     """Set seed for reproducibility.
 
@@ -71,15 +74,16 @@ def pad_and_truncate(samples: list[ModelInput], max_seqlen: int) -> list[BatchIn
     for sample in samples:
         padded_sample = {}
         for key, value in sample.items():
+            if key in RAW_MODEL_INPUT_KEYS or isinstance(value, str):
+                padded_sample[key] = value
+                continue
+
             if "label" in key:
                 pad_value = IGNORE_INDEX
             else:
                 pad_value = 0
 
-            if not isinstance(value, str):
-                padded_sample[key] = _pad_and_truncate(torch.tensor(value), max_length, pad_value)
-            else:
-                padded_sample[key] = value
+            padded_sample[key] = _pad_and_truncate(torch.tensor(value), max_length, pad_value)
 
         padded_samples.append(padded_sample)
 

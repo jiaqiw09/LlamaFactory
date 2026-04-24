@@ -147,6 +147,12 @@ class ModelInput(TypedDict, total=False):
     """Position ids for the model (optional)."""
     token_type_ids: NotRequired[list[int]]
     """Token type ids used in DPO, 1 represents the chosen messages, 2 represents the rejected messages."""
+    images: NotRequired[list[str]]
+    """Local image paths extracted from messages for multimodal models."""
+    extra_info: NotRequired[str]
+    """Extra information for the sample, e.g. kto_labels."""
+    _dataset_name: NotRequired[str]
+    """Dataset name for the sample."""
 
 
 class BatchInput(TypedDict, total=False):
@@ -162,6 +168,10 @@ class BatchInput(TypedDict, total=False):
     """Position ids for the model (optional)."""
     token_type_ids: NotRequired[Tensor]
     """Token type ids used in DPO, 1 represents the chosen messages, 2 represents the rejected messages."""
+    pixel_values: NotRequired[Tensor]
+    """Image tensor for multimodal models."""
+    image_grid_thw: NotRequired[Tensor]
+    """Image grid metadata for multimodal models."""
 
 
 class BatchInfo(TypedDict):
@@ -171,6 +181,8 @@ class BatchInfo(TypedDict):
     """Number of micro batches."""
     cutoff_len: int
     """Cutoff length."""
+    processor: Processor
+    """Tokenizer or multimodal processor used to build batch inputs."""
     data_iter: Iterator[list[ModelInput]]
     """Data iterator."""
 
