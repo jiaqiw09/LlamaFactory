@@ -1,0 +1,5 @@
+qwen3_5_sharegpt_image_demo:
+  path: data/v1_multimodal_sharegpt_image_demo.json
+  source: local
+  converter: sharegpt
+  size: 40

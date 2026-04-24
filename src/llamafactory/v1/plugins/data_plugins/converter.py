@@ -29,6 +29,7 @@ class AlpacaSample(TypedDict, total=False):
     instruction: str
     input: NotRequired[str]
     output: str
+    images: NotRequired[list[str] | str]
 
 
 SharegptMessage = TypedDict(
@@ -39,7 +40,9 @@ SharegptMessage = TypedDict(
 
 class SharegptSample(TypedDict, total=False):
     conversations: list[SharegptMessage]
+    messages: NotRequired[list[dict[str, str]]]
     tools: NotRequired[str]
+    images: NotRequired[list[str] | str]
 
 
 class OpenaiMessage(TypedDict, total=False):
@@ -63,6 +66,50 @@ class DataConverterPlugin(BasePlugin):
         return super().__call__(raw_sample)
 
 
+def _normalize_image_refs(raw_images: list[str] | str | None) -> list[str]:
+    if raw_images is None:
+        return []
+
+    if isinstance(raw_images, str):
+        return [raw_images] if raw_images else []
+
+    return [image for image in raw_images if image]
+
+
+def _consume_image_ref(image_refs: list[str]) -> dict[str, str] | None:
+    if len(image_refs) == 0:
+        return None
+
+    return {"type": "image_url", "value": image_refs.pop(0)}
+
+
+def _content_from_text_and_images(
+    text: str, image_refs: list[str], inject_remaining: bool = False
+) -> list[dict[str, str]]:
+    content: list[dict[str, str]] = []
+    parts = text.split("<image>")
+    for idx, part in enumerate(parts):
+        if part:
+            content.append({"type": "text", "value": part})
+
+        if idx < len(parts) - 1:
+            image_content = _consume_image_ref(image_refs)
+            if image_content is not None:
+                content.append(image_content)
+            else:
+                logger.warning_rank0("Found <image> placeholder but no remaining image path was provided.")
+
+    if inject_remaining:
+        content = [{"type": "image_url", "value": image_ref} for image_ref in image_refs] + content
+
+        image_refs.clear()
+
+    if len(content) == 0:
+        content.append({"type": "text", "value": ""})
+
+    return content
+
+
 @DataConverterPlugin("alpaca").register()
 def alpaca_converter(raw_sample: AlpacaSample) -> SFTSample:
     """Convert Alpaca sample to SFT sample.
@@ -81,13 +128,13 @@ def alpaca_converter(raw_sample: AlpacaSample) -> SFTSample:
             {"role": "system", "content": [{"type": "text", "value": raw_sample["system"]}], "loss_weight": 0.0}
         )
 
-    if "instruction" in raw_sample or "input" in raw_sample:
+    image_refs = _normalize_image_refs(raw_sample.get("images"))
+    if "instruction" in raw_sample or "input" in raw_sample or len(image_refs) != 0:
+        user_text = raw_sample.get("instruction", "") + raw_sample.get("input", "")
         messages.append(
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "value": raw_sample.get("instruction", "") + raw_sample.get("input", "")}
-                ],
+                "content": _content_from_text_and_images(user_text, image_refs, inject_remaining=True),
                 "loss_weight": 0.0,
             }
         )
@@ -115,21 +162,27 @@ def sharegpt_converter(raw_sample: SharegptSample) -> SFTSample:
     tag_mapping = {
         "system": "system",
         "human": "user",
+        "user": "user",
         "gpt": "assistant",
+        "assistant": "assistant",
         "observation": "tool",
+        "tool": "tool",
         "function_call": "assistant",
     }
     sample = {}
     messages = []
-    for message in raw_sample.get("conversations", []):
-        tag = message["from"]
+    image_refs = _normalize_image_refs(raw_sample.get("images"))
+    raw_messages = raw_sample.get("conversations") or raw_sample.get("messages", [])
+    for message in raw_messages:
+        tag = message.get("from", message.get("role"))
+        message_text = message.get("value", message.get("content", ""))
         if tag not in tag_mapping:
             logger.warning_rank0(f"Unsupported role tag {tag} in message: {message}")
         elif tag == "function_call":
             try:
-                tool_calls: ToolCall | list[ToolCall] = json.loads(message["value"])
+                tool_calls: ToolCall | list[ToolCall] = json.loads(message_text)
             except json.JSONDecodeError:
-                logger.warning_rank0(f"Invalid tool call format: {str(message['value'])}")
+                logger.warning_rank0(f"Invalid tool call format: {str(message_text)}")
                 continue
 
             if not isinstance(tool_calls, list):
@@ -143,13 +196,22 @@ def sharegpt_converter(raw_sample: SharegptSample) -> SFTSample:
                 }
             )
         else:
+            role = tag_mapping[tag]
             messages.append(
                 {
-                    "role": tag_mapping[tag],
-                    "content": [{"type": "text", "value": message["value"]}],
-                    "loss_weight": 1.0 if tag == "gpt" else 0.0,
+                    "role": role,
+                    "content": _content_from_text_and_images(message_text, image_refs),
+                    "loss_weight": 1.0 if role == "assistant" else 0.0,
                 }
             )
+
+    if len(image_refs) != 0:
+        for message in messages:
+            if message["role"] == "user":
+                image_contents = [{"type": "image_url", "value": image_ref} for image_ref in image_refs]
+                message["content"] = image_contents + message["content"]
+                image_refs.clear()
+                break
 
     sample["messages"] = messages
 
