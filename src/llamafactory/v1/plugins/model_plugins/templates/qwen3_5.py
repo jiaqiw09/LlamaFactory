@@ -17,15 +17,17 @@ import re
 
 from ....utils.constants import IGNORE_INDEX
 from ....utils.helper import get_tokenizer
-from ....utils.multimodal import get_image_token_counts, render_text_content
+from ....utils.multimodal import get_image_token_counts, get_video_token_counts, render_multimodal_content
 from ....utils.types import Message, ModelInput, Processor, ToolCall
 from ..rendering import RenderingPlugin
 
 
 QWEN3_5_VISION_START = "<|vision_start|>"
 QWEN3_5_IMAGE_PAD = "<|image_pad|>"
+QWEN3_5_VIDEO_PAD = "<|video_pad|>"
 QWEN3_5_VISION_END = "<|vision_end|>"
 QWEN3_5_IMAGE_PLACEHOLDER = QWEN3_5_VISION_START + QWEN3_5_IMAGE_PAD + QWEN3_5_VISION_END
+QWEN3_5_VIDEO_PLACEHOLDER = QWEN3_5_VISION_START + QWEN3_5_VIDEO_PAD + QWEN3_5_VISION_END
 FUNCTION_CALL_PATTERN = re.compile(r"<function=([^>]+)>\s*(.*?)\s*</function>", re.DOTALL)
 PARAMETER_PATTERN = re.compile(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
 
@@ -57,25 +59,40 @@ def _update_model_input(
 def _render_message_content(
     message: Message,
     *,
-    collect_images: bool = True,
+    collect_media: bool = True,
     allow_media: bool = True,
-) -> tuple[str, list[str]]:
-    content_text, images = render_text_content(
+) -> tuple[str, list[str], list[str]]:
+    rendered = render_multimodal_content(
         message["content"],
         image_placeholder=QWEN3_5_IMAGE_PLACEHOLDER,
+        video_placeholder=QWEN3_5_VIDEO_PLACEHOLDER,
     )
-    if len(images) != 0 and not allow_media:
+    if len(rendered.audios) != 0:
+        raise ValueError("The qwen3_5 multimodal bridge does not support audio_url content.")
+
+    if (len(rendered.images) != 0 or len(rendered.videos) != 0) and not allow_media:
         raise ValueError(f"{message['role']} message does not support media content in qwen3_5.")
 
-    return content_text, (images if collect_images else [])
+    if not collect_media:
+        return rendered.text, [], []
+
+    return rendered.text, rendered.images, rendered.videos
 
 
-def _expand_image_placeholders(processor: Processor, content_text: str, images: list[str]) -> str:
+def _expand_media_placeholders(processor: Processor, content_text: str, images: list[str], videos: list[str]) -> str:
     for image_token_count in get_image_token_counts(processor, images):
         image_tokens = QWEN3_5_IMAGE_PAD * image_token_count
         content_text = content_text.replace(
             QWEN3_5_IMAGE_PLACEHOLDER,
             QWEN3_5_VISION_START + image_tokens + QWEN3_5_VISION_END,
+            1,
+        )
+
+    for video_token_count in get_video_token_counts(processor, videos):
+        video_tokens = QWEN3_5_VIDEO_PAD * video_token_count
+        content_text = content_text.replace(
+            QWEN3_5_VIDEO_PLACEHOLDER,
+            QWEN3_5_VISION_START + video_tokens + QWEN3_5_VISION_END,
             1,
         )
 
@@ -90,7 +107,7 @@ def _get_last_query_index(messages: list[Message]) -> int:
         if message["role"] != "user":
             continue
 
-        user_text, _ = _render_message_content(message, collect_images=False)
+        user_text, _, _ = _render_message_content(message, collect_media=False)
 
         if not (user_text.startswith("<tool_response>") and user_text.endswith("</tool_response>")):
             last_query_index = idx
@@ -137,6 +154,7 @@ def render_qwen3_5_messages(
     input_ids, labels, loss_weights = [], [], []
     temp_str, temp_weight = "", 0.0
     images: list[str] = []
+    videos: list[str] = []
 
     if tools:
         temp_str += "<|im_start|>system\n"
@@ -164,8 +182,8 @@ def render_qwen3_5_messages(
             "</IMPORTANT>"
         )
         if messages[0]["role"] == "system":
-            system_text, system_images = _render_message_content(messages[0], allow_media=False)
-            if len(system_images) != 0:
+            system_text, system_images, system_videos = _render_message_content(messages[0], allow_media=False)
+            if len(system_images) != 0 or len(system_videos) != 0:
                 raise ValueError("System message cannot contain media.")
 
             if system_text.strip():
@@ -173,8 +191,8 @@ def render_qwen3_5_messages(
 
         temp_str += "<|im_end|>\n"
     elif messages[0]["role"] == "system":
-        system_text, system_images = _render_message_content(messages[0], allow_media=False)
-        if len(system_images) != 0:
+        system_text, system_images, system_videos = _render_message_content(messages[0], allow_media=False)
+        if len(system_images) != 0 or len(system_videos) != 0:
             raise ValueError("System message cannot contain media.")
 
         temp_str += "<|im_start|>system\n" + system_text + "<|im_end|>\n"
@@ -190,9 +208,10 @@ def render_qwen3_5_messages(
             continue
 
         if message["role"] == "user":
-            message_text, message_images = _render_message_content(message)
-            message_text = _expand_image_placeholders(processor, message_text, message_images)
+            message_text, message_images, message_videos = _render_message_content(message)
+            message_text = _expand_media_placeholders(processor, message_text, message_images, message_videos)
             images.extend(message_images)
+            videos.extend(message_videos)
             temp_str += "<|im_start|>user\n" + message_text + "<|im_end|>\n"
             temp_weight = message.get("loss_weight", 0.0)
         elif message["role"] == "assistant":
@@ -230,8 +249,8 @@ def render_qwen3_5_messages(
             temp_str += "<|im_end|>\n"
             temp_weight = message.get("loss_weight", 1.0)
         elif message["role"] == "tool":
-            tool_text, tool_images = _render_message_content(message, allow_media=False)
-            if len(tool_images) != 0:
+            tool_text, tool_images, tool_videos = _render_message_content(message, allow_media=False)
+            if len(tool_images) != 0 or len(tool_videos) != 0:
                 raise ValueError("Tool message cannot contain media.")
 
             if turn_idx == 0 or messages[turn_idx - 1]["role"] != "tool":
@@ -265,6 +284,8 @@ def render_qwen3_5_messages(
     )
     if len(images) != 0:
         model_input["images"] = images
+    if len(videos) != 0:
+        model_input["videos"] = videos
 
     return model_input
 

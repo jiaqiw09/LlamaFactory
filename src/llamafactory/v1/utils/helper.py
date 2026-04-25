@@ -22,7 +22,7 @@ from .constants import IGNORE_INDEX
 from .types import BatchInput, ModelInput, Processor, Tensor
 
 
-RAW_MODEL_INPUT_KEYS = {"images"}
+RAW_MODEL_INPUT_KEYS = {"images", "videos", "audios"}
 
 
 def set_seed(seed: int) -> None:

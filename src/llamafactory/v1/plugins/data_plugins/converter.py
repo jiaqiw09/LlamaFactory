@@ -30,6 +30,8 @@ class AlpacaSample(TypedDict, total=False):
     input: NotRequired[str]
     output: str
     images: NotRequired[list[str] | str]
+    videos: NotRequired[list[str] | str]
+    audios: NotRequired[list[str] | str]
 
 
 SharegptMessage = TypedDict(
@@ -43,6 +45,8 @@ class SharegptSample(TypedDict, total=False):
     messages: NotRequired[list[dict[str, str]]]
     tools: NotRequired[str]
     images: NotRequired[list[str] | str]
+    videos: NotRequired[list[str] | str]
+    audios: NotRequired[list[str] | str]
 
 
 class OpenaiMessage(TypedDict, total=False):
@@ -76,33 +80,53 @@ def _normalize_image_refs(raw_images: list[str] | str | None) -> list[str]:
     return [image for image in raw_images if image]
 
 
-def _consume_image_ref(image_refs: list[str]) -> dict[str, str] | None:
-    if len(image_refs) == 0:
+def _consume_media_ref(media_refs: dict[str, list[str]], content_type: str) -> dict[str, str] | None:
+    refs = media_refs[content_type]
+    if len(refs) == 0:
         return None
 
-    return {"type": "image_url", "value": image_refs.pop(0)}
+    return {"type": content_type, "value": refs.pop(0)}
 
 
-def _content_from_text_and_images(
-    text: str, image_refs: list[str], inject_remaining: bool = False
+def _remaining_media_contents(media_refs: dict[str, list[str]]) -> list[dict[str, str]]:
+    contents: list[dict[str, str]] = []
+    for content_type in ("image_url", "video_url", "audio_url"):
+        contents.extend({"type": content_type, "value": media_ref} for media_ref in media_refs[content_type])
+        media_refs[content_type].clear()
+
+    return contents
+
+
+def _content_from_text_and_media(
+    text: str, media_refs: dict[str, list[str]], inject_remaining: bool = False
 ) -> list[dict[str, str]]:
     content: list[dict[str, str]] = []
-    parts = text.split("<image>")
-    for idx, part in enumerate(parts):
-        if part:
-            content.append({"type": "text", "value": part})
+    placeholder_types = {"<image>": "image_url", "<video>": "video_url", "<audio>": "audio_url"}
+    cursor = 0
+    while cursor < len(text):
+        matches = [(placeholder, text.find(placeholder, cursor)) for placeholder in placeholder_types]
+        matches = [(placeholder, index) for placeholder, index in matches if index != -1]
+        if len(matches) == 0:
+            break
 
-        if idx < len(parts) - 1:
-            image_content = _consume_image_ref(image_refs)
-            if image_content is not None:
-                content.append(image_content)
-            else:
-                logger.warning_rank0("Found <image> placeholder but no remaining image path was provided.")
+        placeholder, index = min(matches, key=lambda item: item[1])
+        if index > cursor:
+            content.append({"type": "text", "value": text[cursor:index]})
+
+        content_type = placeholder_types[placeholder]
+        media_content = _consume_media_ref(media_refs, content_type)
+        if media_content is not None:
+            content.append(media_content)
+        else:
+            logger.warning_rank0(f"Found {placeholder} placeholder but no remaining media path was provided.")
+
+        cursor = index + len(placeholder)
+
+    if cursor < len(text):
+        content.append({"type": "text", "value": text[cursor:]})
 
     if inject_remaining:
-        content = [{"type": "image_url", "value": image_ref} for image_ref in image_refs] + content
-
-        image_refs.clear()
+        content = _remaining_media_contents(media_refs) + content
 
     if len(content) == 0:
         content.append({"type": "text", "value": ""})
@@ -128,13 +152,17 @@ def alpaca_converter(raw_sample: AlpacaSample) -> SFTSample:
             {"role": "system", "content": [{"type": "text", "value": raw_sample["system"]}], "loss_weight": 0.0}
         )
 
-    image_refs = _normalize_image_refs(raw_sample.get("images"))
-    if "instruction" in raw_sample or "input" in raw_sample or len(image_refs) != 0:
+    media_refs = {
+        "image_url": _normalize_image_refs(raw_sample.get("images")),
+        "video_url": _normalize_image_refs(raw_sample.get("videos")),
+        "audio_url": _normalize_image_refs(raw_sample.get("audios")),
+    }
+    if "instruction" in raw_sample or "input" in raw_sample or any(len(refs) != 0 for refs in media_refs.values()):
         user_text = raw_sample.get("instruction", "") + raw_sample.get("input", "")
         messages.append(
             {
                 "role": "user",
-                "content": _content_from_text_and_images(user_text, image_refs, inject_remaining=True),
+                "content": _content_from_text_and_media(user_text, media_refs, inject_remaining=True),
                 "loss_weight": 0.0,
             }
         )
@@ -171,7 +199,11 @@ def sharegpt_converter(raw_sample: SharegptSample) -> SFTSample:
     }
     sample = {}
     messages = []
-    image_refs = _normalize_image_refs(raw_sample.get("images"))
+    media_refs = {
+        "image_url": _normalize_image_refs(raw_sample.get("images")),
+        "video_url": _normalize_image_refs(raw_sample.get("videos")),
+        "audio_url": _normalize_image_refs(raw_sample.get("audios")),
+    }
     raw_messages = raw_sample.get("conversations") or raw_sample.get("messages", [])
     for message in raw_messages:
         tag = message.get("from", message.get("role"))
@@ -200,17 +232,15 @@ def sharegpt_converter(raw_sample: SharegptSample) -> SFTSample:
             messages.append(
                 {
                     "role": role,
-                    "content": _content_from_text_and_images(message_text, image_refs),
+                    "content": _content_from_text_and_media(message_text, media_refs),
                     "loss_weight": 1.0 if role == "assistant" else 0.0,
                 }
             )
 
-    if len(image_refs) != 0:
+    if any(len(refs) != 0 for refs in media_refs.values()):
         for message in messages:
             if message["role"] == "user":
-                image_contents = [{"type": "image_url", "value": image_ref} for image_ref in image_refs]
-                message["content"] = image_contents + message["content"]
-                image_refs.clear()
+                message["content"] = _remaining_media_contents(media_refs) + message["content"]
                 break
 
     sample["messages"] = messages

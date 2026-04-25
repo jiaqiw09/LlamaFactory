@@ -149,6 +149,10 @@ class ModelInput(TypedDict, total=False):
     """Token type ids used in DPO, 1 represents the chosen messages, 2 represents the rejected messages."""
     images: NotRequired[list[str]]
     """Local image paths extracted from messages for multimodal models."""
+    videos: NotRequired[list[str]]
+    """Local video paths extracted from messages for multimodal models."""
+    audios: NotRequired[list[str]]
+    """Local audio paths extracted from messages for multimodal models."""
     extra_info: NotRequired[str]
     """Extra information for the sample, e.g. kto_labels."""
     _dataset_name: NotRequired[str]
@@ -172,6 +176,12 @@ class BatchInput(TypedDict, total=False):
     """Image tensor for multimodal models."""
     image_grid_thw: NotRequired[Tensor]
     """Image grid metadata for multimodal models."""
+    pixel_values_videos: NotRequired[Tensor]
+    """Video tensor for multimodal models."""
+    video_grid_thw: NotRequired[Tensor]
+    """Video grid metadata for multimodal models."""
+    second_per_grid_ts: NotRequired[Tensor]
+    """Video timestamp metadata for multimodal models."""
 
 
 class BatchInfo(TypedDict):
