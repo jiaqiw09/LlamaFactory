@@ -1,0 +1,5 @@
+qwen3_5_alpaca_image_demo:
+  path: data/v1_multimodal_alpaca_image_demo.json
+  source: local
+  converter: alpaca
+  size: 40

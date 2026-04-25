@@ -1,0 +1,26 @@
+[
+  {
+    "instruction": "<image>Who are the people in this image?",
+    "input": "",
+    "output": "The image shows two soccer players celebrating on the field.",
+    "images": [
+      "data/mllm_demo_data/1.jpg"
+    ]
+  },
+  {
+    "instruction": "Describe what is happening in this picture.",
+    "input": "",
+    "output": "A soccer player is sliding across the grass in celebration.",
+    "images": [
+      "data/mllm_demo_data/2.jpg"
+    ]
+  },
+  {
+    "instruction": "<image>Please summarize the scene in one sentence.",
+    "input": "",
+    "output": "A person in a blue outfit is speaking at a podium.",
+    "images": [
+      "data/mllm_demo_data/3.jpg"
+    ]
+  }
+]
