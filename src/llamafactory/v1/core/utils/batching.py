@@ -58,7 +58,8 @@ def default_collate_fn(buffer: StatefulBuffer, batch_info: BatchInfo) -> list[Ba
         micro_batch = samples[i * micro_batch_size : (i + 1) * micro_batch_size]
         text_inputs, multimodal_inputs = zip(*(split_model_input(sample) for sample in micro_batch), strict=False)
         collated_batch = default_collate(pad_and_truncate(list(text_inputs), cutoff_len))
-        collated_batch.update(build_multimodal_tensors(batch_info["processor"], multimodal_inputs))
+        multimodal_tensors = build_multimodal_tensors(batch_info["processor"], multimodal_inputs)
+        collated_batch.update(multimodal_tensors)
         batch.append(collated_batch)
 
     return batch
@@ -163,6 +164,11 @@ class BatchGenerator(Iterator):
 
             self._length = BatchingPlugin(self.batching_strategy).compute_length(self._data_provider)
             raise NotImplementedError("Batching strategy other than NORMAL is not supported yet.")
+
+        logger.info_rank0(
+            f"[BatchGenerator] Data provider is ready: batches_per_epoch={self._length}, "
+            f"dataset_size={len(self.dataset)}, drop_last={self.drop_last}."
+        )
 
     def __len__(self) -> int:
         return self._length

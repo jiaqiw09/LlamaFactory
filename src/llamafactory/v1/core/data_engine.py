@@ -41,7 +41,11 @@ from huggingface_hub import hf_hub_download
 from omegaconf import OmegaConf
 from torch.utils.data import Dataset
 
+from ..utils import logging
 from ..utils.types import DatasetInfo, HFDataset, Sample
+
+
+logger = logging.get_logger(__name__)
 
 
 class DataEngine(Dataset):
@@ -65,6 +69,10 @@ class DataEngine(Dataset):
         self._get_dataset_info()
         self._load_dataset()
         self._build_data_index()
+        logger.info_rank0(
+            f"[DataEngine] Data is ready: path={self.path}, datasets={len(self.dataset_infos)}, "
+            f"streaming={self.streaming}, samples={len(self)}."
+        )
 
     def _get_dataset_info(self) -> None:
         """Get dataset info from data arguments."""
