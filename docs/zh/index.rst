@@ -1,62 +1,72 @@
-LlamaFactory 文档
-=================
+LlamaFactory v1 文档
+=====================
 
 .. toctree::
    :maxdepth: 1
-   :caption: Getting Started
+   :caption: Quick Start
 
-   getting-started
-   installation
-   llamaboard-web-ui
+   quick_start
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Feature Guide
+
+   feature-guide/index
+   feature-guide/data_preparation
+   feature-guide/sft
+   feature-guide/dpo
+   feature-guide/inference
+   feature-guide/model_export
+   feature-guide/model_saving
+   feature-guide/distributed_training
+   feature-guide/custom_kernels
 
 .. toctree::
    :maxdepth: 1
-   :caption: Data Preparation
+   :caption: Support Status
 
-   data-preparation/data-processing
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Training
-
-   training/sft
-   training/dpo
+   hardware_support_matrix
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Inference
+   :maxdepth: 2
+   :caption: Parameter Reference
 
-   inference/deploy
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Advanced
-
-   advanced/lora-and-quantization/lora
-   advanced/lora-and-quantization/quantization
-   advanced/distributed/fsdp
-   advanced/distributed/deepspeed
-   advanced/distributed/parallel-dp-tp-ep-sp-cp
-   advanced/custom-kernels/triton
-   advanced/custom-kernels/fused-operators
+   parameter-reference/index
+   parameter-reference/data_arguments
+   parameter-reference/model_arguments
+   parameter-reference/training_arguments
+   parameter-reference/sample_arguments
+   parameter-reference/peft_config
+   parameter-reference/kernel_config
+   parameter-reference/dist_config
+   parameter-reference/quant_config
+   parameter-reference/init_config
+   parameter-reference/dataset_info
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Hyperparameters
+   :maxdepth: 2
+   :caption: Developer Guide
 
-   hyperparameters/data-argument
-   hyperparameters/model-argument
-   hyperparameters/sample-argument
-   hyperparameters/training-argument
+   developer-guide/index
+   developer-guide/architecture_overview
+   developer-guide/baseplugin_mechanism
+   developer-guide/core/data_engine
+   developer-guide/core/model_engine
+   developer-guide/core/base_trainer
+   developer-guide/core/accelerator
+   developer-guide/core/renderer
+   developer-guide/core/batch_generator
+   developer-guide/core/callback
+   developer-guide/plugins/data_plugins
+   developer-guide/plugins/model_plugins
+   developer-guide/plugins/trainer_plugins
+   developer-guide/plugins/custom-kernels/overview
+   developer-guide/plugins/custom-kernels/kernels_api
+   developer-guide/plugins/custom-kernels/fused_operators
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Dev Guide
+   :maxdepth: 2
+   :caption: Multi-Backend
 
-   dev-guide/core/data-engine
-   dev-guide/core/model-engine
-   dev-guide/core/trainer
-   dev-guide/plugins/data-plugins
-   dev-guide/plugins/model-plugins/initialization
-   dev-guide/plugins/model-plugins/kernels
-   dev-guide/plugins/model-plugins/rendering
+   multi-backend/index
+   multi-backend/npu/index
