@@ -20,7 +20,6 @@ Init Phase:
 
 """
 
-import re
 import types
 
 import torch
@@ -86,47 +85,53 @@ def _npu_swiglu_gemma3ntext_forward(self, hidden_states):
     return down_proj
 
 
+kernel_swiglu_mapping = {
+    "Qwen3ForCausalLM": {
+        "Qwen3MLP": npu_swiglu_forward,
+    },
+    "Qwen3MoeForCausalLM": {
+        "Qwen3MoeMLP": npu_swiglu_forward,
+    },
+    "Qwen3NextForCausalLM": {
+        "Qwen3NextMLP": npu_swiglu_forward,
+    },
+    "Qwen3VLForConditionalGeneration": {
+        "Qwen3VLTextMLP": npu_swiglu_forward,
+    },
+    "Qwen3VLMoeForConditionalGeneration": {
+        "Qwen3VLMoeTextMLP": npu_swiglu_forward,
+    },
+    "Qwen3_5ForCausalLM": {
+        "Qwen3_5MLP": npu_swiglu_forward,
+    },
+    "Qwen3_5ForConditionalGeneration": {
+        "Qwen3_5MLP": npu_swiglu_forward,
+    },
+    "Qwen3_5MoeForCausalLM": {
+        "Qwen3_5MoeMLP": npu_swiglu_forward,
+    },
+    "Qwen3_5MoeForConditionalGeneration": {
+        "Qwen3_5MoeMLP": npu_swiglu_forward,
+    },
+    "Qwen3OmniMoeForConditionalGeneration": {
+        "Qwen3OmniMoeCode2WavMlp": npu_swiglu_forward,
+        "Qwen3OmniMoeMLP": npu_swiglu_forward,
+        "Qwen3OmniMoeTalkerTextMLP": npu_swiglu_forward,
+        "Qwen3OmniMoeThinkerTextMLP": npu_swiglu_forward,
+    },
+}
+
+
 @register_kernel
 class NpuSwiGluKernel(BaseKernel):
     """NPU Kernel for fused SwiGLU activation."""
-
-    # just support apply to the following module layers
-    expect_modules = frozenset(
-        {
-            "Qwen3VLMoeTextMLP",
-            "Qwen3VLTextMLP",
-            "Qwen3OmniMoeThinkerTextMLP",
-            "Qwen3OmniMoeMLP",
-            "Qwen3OmniMoeTalkerTextMLP",
-            "Qwen3OmniMoeCode2WavMlp",
-            "Qwen3NextMLP",
-            "Qwen3MoeMLP",
-            "Qwen3MLP",
-            "Qwen2MLP",
-            "Qwen2MoeMLP",
-            "Qwen2_5_VLMLP",
-            "Qwen2_5OmniMLP",
-            "Llama4TextMLP",
-            "LlamaMLP",
-            "Glm4MLP",
-            "Glm4MoeMLP",
-            "Glm4vMoeTextMLP",
-            "Gemma3MLP",
-            "Gemma2MLP",
-            "Gemma3nTextMLP",
-            "Phi3MLP",
-            "DeepseekV2MLP",
-            "DeepseekV3MLP",
-            "SeedOssMLP",
-        }
-    )
 
     _kernel_id = "npu_fused_swiglu"
     _device = DeviceType.NPU
 
     @classmethod
     def apply(cls, **kwargs) -> "HFModel":
-        """Applies the NPU fused SwiGLU kernel to the model.
+        """Applies the NPU fused SwiGLU kernel to whitelisted MLP modules.
 
         Args:
             **kwargs: Keyword arguments containing the model.
@@ -145,24 +150,22 @@ class NpuSwiGluKernel(BaseKernel):
         if not cls.check_deps():
             raise RuntimeError("torch_npu is not available but NpuSwiGluKernel was called.")
 
-        # Mapping of specific mlp modules to their corresponding kernel implementations
-        kernel_mapping = {
-            "Glm4MLP": _npu_swiglu_glm4_forward,
-            "Glm4vTextMLP": _npu_swiglu_glm4_forward,
-            "Phi3MLP": _npu_swiglu_glm4_forward,
-            "Gemma3nTextMLP": _npu_swiglu_gemma3ntext_forward,
-        }
+        archs = getattr(model.config, "architectures", None) or []
+        target_swiglu_mapping = None
+        for arch in archs:
+            if arch in kernel_swiglu_mapping:
+                target_swiglu_mapping = kernel_swiglu_mapping[arch]
+                break
 
-        swiglu_pattern = re.compile("MLP", re.IGNORECASE)
-        for name, module in model.named_modules():
-            # Match any module whose class name contains "MLP"
-            if (
-                re.search(swiglu_pattern, module.__class__.__name__)
-                and module.__class__.__name__ in cls.expect_modules
-            ):
+        if target_swiglu_mapping is None:
+            return model
+
+        for _, module in model.named_modules():
+            class_name = module.__class__.__name__
+            if class_name in target_swiglu_mapping:
                 # Bind function as an instance method to preserve `self` semantics
                 # and replace the original forward
-                kernel_func = kernel_mapping.get(module.__class__.__name__, npu_swiglu_forward)
-                module.forward = types.MethodType(kernel_func, module)
+                new_forward_func = target_swiglu_mapping[class_name]
+                module.forward = types.MethodType(new_forward_func, module)
 
         return model

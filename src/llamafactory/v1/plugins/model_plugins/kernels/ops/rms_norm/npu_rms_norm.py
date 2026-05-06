@@ -20,7 +20,6 @@ Init Phase:
 
 """
 
-import re
 import types
 
 import torch
@@ -123,6 +122,48 @@ def npu_gated_rms_norm_forward(self, hidden_states, gate=None):
     return hidden_states.to(input_dtype)
 
 
+kernel_rms_norm_mapping = {
+    "Qwen3ForCausalLM": {
+        "Qwen3RMSNorm": npu_rms_norm_forward,
+    },
+    "Qwen3MoeForCausalLM": {
+        "Qwen3MoeRMSNorm": npu_rms_norm_forward,
+    },
+    "Qwen3NextForCausalLM": {
+        "Qwen3NextRMSNorm": npu_rms_norm_forward,
+        "Qwen3NextRMSNormGated": npu_gated_rms_norm_forward,
+    },
+    "Qwen3VLForConditionalGeneration": {
+        "Qwen3VLTextRMSNorm": npu_rms_norm_forward,
+    },
+    "Qwen3VLMoeForConditionalGeneration": {
+        "Qwen3VLMoeTextRMSNorm": npu_rms_norm_forward,
+    },
+    "Qwen3_5ForCausalLM": {
+        "Qwen3_5RMSNorm": npu_rms_norm_forward,
+        "Qwen3_5RMSNormGated": npu_gated_rms_norm_forward,
+    },
+    "Qwen3_5ForConditionalGeneration": {
+        "Qwen3_5RMSNorm": npu_rms_norm_forward,
+        "Qwen3_5RMSNormGated": npu_gated_rms_norm_forward,
+    },
+    "Qwen3_5MoeForCausalLM": {
+        "Qwen3_5MoeRMSNorm": npu_rms_norm_forward,
+        "Qwen3_5MoeRMSNormGated": npu_gated_rms_norm_forward,
+    },
+    "Qwen3_5MoeForConditionalGeneration": {
+        "Qwen3_5MoeRMSNorm": npu_rms_norm_forward,
+        "Qwen3_5MoeRMSNormGated": npu_gated_rms_norm_forward,
+    },
+    "Qwen3OmniMoeForConditionalGeneration": {
+        "Qwen3OmniMoeCode2WavRMSNorm": npu_rms_norm_forward,
+        "Qwen3OmniMoeRMSNorm": npu_rms_norm_forward,
+        "Qwen3OmniMoeTextRMSNorm": npu_rms_norm_forward,
+        "Qwen3OmniMoeThinkerTextRMSNorm": npu_rms_norm_forward,
+    },
+}
+
+
 @register_kernel
 class NpuRMSNormKernel(BaseKernel):
     """NPU kernel wrapper for RMSNorm that applies the replacement within a model."""
@@ -132,11 +173,10 @@ class NpuRMSNormKernel(BaseKernel):
 
     @classmethod
     def apply(cls, **kwargs) -> "HFModel":
-        """Iterate the model and apply NPU-optimized forward to matched RMSNorm modules.
+        """Iterate the model and apply NPU-optimized forward to whitelisted RMSNorm modules.
 
-        Matches modules whose class name contains "RMSNorm" (case-insensitive) and binds
-        the appropriate NPU-optimized forward function as an instance method via
-        ``types.MethodType`` to replace the original ``forward``.
+        Matches the model architecture first, then binds the appropriate NPU-optimized
+        forward function to whitelisted RMSNorm module classes via ``types.MethodType``.
 
         Args:
             **kwargs: Keyword arguments containing the model.
@@ -155,13 +195,20 @@ class NpuRMSNormKernel(BaseKernel):
         if not cls.check_deps():
             raise RuntimeError(f"torch_npu is not available but {cls.__name__} was called.")
 
-        rms_norm_pattern = re.compile("RMSNorm", re.IGNORECASE)
+        archs = getattr(model.config, "architectures", None) or []
+        target_rms_norm_mapping = None
+        for arch in archs:
+            if arch in kernel_rms_norm_mapping:
+                target_rms_norm_mapping = kernel_rms_norm_mapping[arch]
+                break
+
+        if target_rms_norm_mapping is None:
+            return model
 
         for _, module in model.named_modules():
-            if re.search(rms_norm_pattern, module.__class__.__name__):
-                if "Gated" in module.__class__.__name__:
-                    module.forward = types.MethodType(npu_gated_rms_norm_forward, module)
-                else:
-                    module.forward = types.MethodType(npu_rms_norm_forward, module)
+            class_name = module.__class__.__name__
+            if class_name in target_rms_norm_mapping:
+                new_forward_func = target_rms_norm_mapping[class_name]
+                module.forward = types.MethodType(new_forward_func, module)
 
         return model

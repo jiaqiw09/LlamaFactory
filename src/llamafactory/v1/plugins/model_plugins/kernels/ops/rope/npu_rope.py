@@ -125,6 +125,55 @@ def _apply_multimodal_rotary_pos_emb_qwen25_vl(q, k, cos, sin, mrope_section, un
     return _apply_npu_rotary_emb(q, k, cos, sin)
 
 
+def _apply_rotary_pos_emb_vision(q, k, cos, sin):
+    """Apply vision Rotary Position Embedding to query and key tensors using NPU optimization."""
+    cos = cos.unsqueeze(-2)
+    sin = sin.unsqueeze(-2)
+
+    return _apply_npu_rotary_emb(q, k, cos, sin)
+
+
+kernel_rope_mapping = {
+    "Qwen3ForCausalLM": {
+        "Qwen3Attention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+    },
+    "Qwen3MoeForCausalLM": {
+        "Qwen3MoeAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+    },
+    "Qwen3NextForCausalLM": {
+        "Qwen3NextAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+    },
+    "Qwen3VLForConditionalGeneration": {
+        "Qwen3VLTextAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+        "Qwen3VLVisionAttention": ("apply_rotary_pos_emb_vision", _apply_rotary_pos_emb_vision),
+    },
+    "Qwen3VLMoeForConditionalGeneration": {
+        "Qwen3VLMoeTextAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+        "Qwen3VLMoeVisionAttention": ("apply_rotary_pos_emb_vision", _apply_rotary_pos_emb_vision),
+    },
+    "Qwen3_5ForCausalLM": {
+        "Qwen3_5Attention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+    },
+    "Qwen3_5ForConditionalGeneration": {
+        "Qwen3_5Attention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+        "Qwen3_5VisionAttention": ("apply_rotary_pos_emb_vision", _apply_rotary_pos_emb_vision),
+    },
+    "Qwen3_5MoeForCausalLM": {
+        "Qwen3_5MoeAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+    },
+    "Qwen3_5MoeForConditionalGeneration": {
+        "Qwen3_5MoeAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+        "Qwen3_5MoeVisionAttention": ("apply_rotary_pos_emb_vision", _apply_rotary_pos_emb_vision),
+    },
+    "Qwen3OmniMoeForConditionalGeneration": {
+        "Qwen3OmniMoeCode2WavAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+        "Qwen3OmniMoeTalkerCodePredictorAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+        "Qwen3OmniMoeThinkerTextAttention": ("apply_rotary_pos_emb", _apply_rotary_pos_emb),
+        "Qwen3OmniMoeVisionAttention": ("apply_rotary_pos_emb_vision", _apply_rotary_pos_emb_vision),
+    },
+}
+
+
 @register_kernel
 class NpuRoPEKernel(BaseKernel):
     """NPU Kernel for Rotary Position Embedding."""
@@ -134,12 +183,11 @@ class NpuRoPEKernel(BaseKernel):
 
     @classmethod
     def apply(cls, **kwargs) -> "HFModel":
-        """Apply RoPE acceleration by monkey-patching ``apply_rotary_pos_emb``.
+        """Apply RoPE acceleration to whitelisted attention modules.
 
-        Iterates through the model's modules to find attention layers, identifies
-        the module where they are defined, and replaces the original
-        ``apply_rotary_pos_emb`` function in that module's namespace with the
-        NPU-accelerated version.
+        Matches the model architecture first, then identifies whitelisted attention
+        module classes and replaces the matching RoPE helper in that module's namespace
+        with the NPU-accelerated version.
 
         Args:
             **kwargs: Keyword arguments containing the model.
@@ -158,30 +206,35 @@ class NpuRoPEKernel(BaseKernel):
         if model is None:
             raise ValueError(f"HFModel instance is required for {cls.__name__}.")
 
-        _modules = set()
+        archs = getattr(model.config, "architectures", None) or []
+        target_rope_mapping = None
+        for arch in archs:
+            if arch in kernel_rope_mapping:
+                target_rope_mapping = kernel_rope_mapping[arch]
+                break
+
+        if target_rope_mapping is None:
+            return model
+
+        patched_modules = set()
         for module in model.modules():
-            if "Attention" in module.__class__.__name__:
-                module_name = module.__class__.__module__
-                if module_name in _modules:
-                    continue
-                try:
-                    target_module = sys.modules[module_name]
-                    if hasattr(target_module, "apply_rotary_pos_emb"):
-                        if getattr(target_module, "apply_rotary_pos_emb") is not _apply_rotary_pos_emb:
-                            setattr(target_module, "apply_rotary_pos_emb", _apply_rotary_pos_emb)
-                            _modules.add(module_name)
-                    if hasattr(target_module, "apply_multimodal_rotary_pos_emb"):
-                        if (
-                            getattr(target_module, "apply_multimodal_rotary_pos_emb")
-                            is not _apply_multimodal_rotary_pos_emb_qwen25_vl
-                        ):
-                            setattr(
-                                target_module,
-                                "apply_multimodal_rotary_pos_emb",
-                                _apply_multimodal_rotary_pos_emb_qwen25_vl,
-                            )
-                            _modules.add(module_name)
-                except Exception as e:
-                    logger.warning_rank0_once(f"Failed to apply RoPE kernel to module {module_name}: {e}")
+            class_name = module.__class__.__name__
+            if class_name not in target_rope_mapping:
+                continue
+
+            target_func_name, new_func = target_rope_mapping[class_name]
+            module_name = module.__class__.__module__
+            patch_key = (module_name, target_func_name)
+            if patch_key in patched_modules:
+                continue
+
+            try:
+                target_module = sys.modules[module_name]
+                if hasattr(target_module, target_func_name):
+                    if getattr(target_module, target_func_name) is not new_func:
+                        setattr(target_module, target_func_name, new_func)
+                patched_modules.add(patch_key)
+            except Exception as e:
+                logger.warning_rank0_once(f"Failed to apply RoPE kernel to module {module_name}: {e}")
 
         return model
