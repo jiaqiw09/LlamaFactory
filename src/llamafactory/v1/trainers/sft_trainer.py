@@ -30,7 +30,13 @@ class SFTTrainer(BaseTrainer):
 
 
 def run_sft(args: InputArgument = None):
+    from ..core.utils.config_parsing import parse_model_plugin_configs, parse_training_plugin_configs
+    from ..core.utils.cross_slot_validation import validate_cross_slot_constraints
+
     model_args, data_args, training_args, _ = get_args(args)
+    parse_training_plugin_configs(training_args)
+    parse_model_plugin_configs(model_args)
+    validate_cross_slot_constraints(model_args, training_args)
     DistributedInterface(training_args.dist_config)
     train_dataset = DataEngine(data_args.train_dataset)
     model_engine = ModelEngine(model_args, is_train=True)

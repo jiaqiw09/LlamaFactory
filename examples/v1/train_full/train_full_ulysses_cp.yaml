@@ -5,6 +5,9 @@ model_class: llm
 template: qwen3_nothink
 
 # FSDP Config
+# cp_size / cp_mode are sequence-parallel knobs; user-facing they live under
+# dist_config (single namespace), but internally they're routed to a separate
+# SequenceParallelConfig sub-object — see DistConfig wrapper.
 dist_config:
   name: fsdp2
   dcp_path: null

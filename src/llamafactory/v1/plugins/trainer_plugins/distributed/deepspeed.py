@@ -46,11 +46,8 @@ class DeepSpeedEngine:
     - ZeRO-3 parameter gathering for saving
     """
 
-    def __init__(self, dist_config: dict[str, Any], num_micro_batch: int = 1, micro_batch_size: int = 1):
-        config_file = dist_config.get("config_file")
-        if not config_file:
-            raise ValueError("DeepSpeed config_file is required in dist_config")
-
+    def __init__(self, dist_config, num_micro_batch: int = 1, micro_batch_size: int = 1):
+        config_file = dist_config.config_file
         ds_plugin = DeepSpeedPlugin(hf_ds_config=config_file)
         ds_plugin.set_mixed_precision(infer_deepspeed_mixed_precision(ds_plugin.deepspeed_config))
 

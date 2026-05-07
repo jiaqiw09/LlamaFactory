@@ -16,7 +16,7 @@ import os
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from .arg_utils import BatchingStrategy, PluginConfig, get_plugin_config
+from .arg_utils import BatchingStrategy, PluginConfig, normalize_plugin_argument
 
 
 @dataclass
@@ -71,7 +71,12 @@ class TrainingArguments:
     )
     dist_config: PluginConfig | None = field(
         default=None,
-        metadata={"help": "Distribution configuration for training."},
+        metadata={
+            "help": "Distributed configuration. Single user-facing namespace covering both "
+            "the sharding backend (fsdp2 / deepspeed / ...) and any cross-cutting "
+            "parallelism settings (cp_size, cp_mode). Internally routed into a "
+            "backend dataclass + a sequence-parallel dataclass."
+        },
     )
     optim_config: PluginConfig | None = field(
         default=None,
@@ -113,6 +118,10 @@ class TrainingArguments:
     )
 
     def __post_init__(self) -> None:
-        self.dist_config = get_plugin_config(self.dist_config)
-        self.optim_config = get_plugin_config(self.optim_config)
-        self.lr_scheduler_config = get_plugin_config(self.lr_scheduler_config)
+        # Only normalize raw input shape here. Strict per-slot dataclass parsing
+        # is performed lazily by the consumer (model_engine / base_trainer) so
+        # that the config layer does not depend on the plugin layer (preserving
+        # the documented v1 layering: trainers > core > plugins, config > utils).
+        self.dist_config = normalize_plugin_argument(self.dist_config)
+        self.optim_config = normalize_plugin_argument(self.optim_config)
+        self.lr_scheduler_config = normalize_plugin_argument(self.lr_scheduler_config)

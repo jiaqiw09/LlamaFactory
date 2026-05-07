@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import sys
+from dataclasses import dataclass
 from functools import partial
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -21,6 +23,7 @@ import torch.nn.functional as F
 import transformers
 
 from ....accelerator.interface import Dim, DistributedInterface
+from ....config.arg_utils import StrictConfigMixin
 from ....utils import logging
 from ....utils.plugin import BasePlugin
 from ....utils.types import ModelOutput
@@ -36,9 +39,29 @@ from .ulysses import (
 logger = logging.get_logger(__name__)
 
 
+@dataclass
+class SequenceParallelConfig(StrictConfigMixin):
+    """Sequence/context-parallel configuration.
+
+    Cross-cutting: consumed by ``SequenceParallelModelPlugin`` (attention rewrite),
+    by the loss plugin, and by the data engine (sequence chunking). Independent of
+    which sharding backend is selected — that's why it lives in its own slot
+    rather than nested under ``dist_config``.
+
+    The discriminator field is ``cp_mode`` (the SP implementation), not ``name``.
+    """
+
+    cp_size: int = 1
+    cp_mode: Literal["ulysses"] = "ulysses"
+
+    def __post_init__(self) -> None:
+        if self.cp_size < 1:
+            raise ValueError(f"cp_size must be >= 1, got {self.cp_size}.")
+
+
 class SequenceParallelModelPlugin(BasePlugin):
-    def __call__(self, model, model_args):
-        return super().__call__(model, model_args)
+    def __call__(self, model, sp_config):
+        return super().__call__(model, sp_config)
 
 
 class SequenceParallelLossPlugin(BasePlugin):
@@ -82,10 +105,10 @@ def new_flash_attn_forward(
 
 
 @SequenceParallelModelPlugin("ulysses").register()
-def apply_sequence_parallel(model, model_args):
+def apply_sequence_parallel(model, sp_config: SequenceParallelConfig):
     # Replace _flash_attention_forward with new_flash_attn_forward
     module = sys.modules[model.__module__]
-    cp_size = model_args.get("cp_size", 1)
+    cp_size = sp_config.cp_size
 
     set_ulysses_sequence_parallel_group(DistributedInterface().get_group(Dim.CP))
 

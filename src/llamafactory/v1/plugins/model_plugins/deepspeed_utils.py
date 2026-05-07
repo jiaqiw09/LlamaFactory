@@ -69,11 +69,9 @@ def _load_deepspeed_config(config_file: str) -> dict[str, Any]:
         return json.load(f)
 
 
-def setup_deepspeed_zero3_model_loading(is_train: bool, dist_config: dict[str, Any] | None):
+def setup_deepspeed_zero3_model_loading(is_train: bool, dist_config):
     """Enable transformers' ZeRO-3-aware model loading for the current thread."""
-    config_file = dist_config.get("config_file")
-    if not config_file:
-        raise ValueError("DeepSpeed config_file is required in dist_config")
+    config_file = dist_config.config_file
 
     from accelerate.utils import DeepSpeedPlugin
 

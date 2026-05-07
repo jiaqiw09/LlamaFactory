@@ -22,8 +22,11 @@ Init Phase:
 """
 
 import importlib
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
+from ....config.arg_utils import StrictConfigMixin
 from ....utils import logging
 from ....utils.plugin import BasePlugin
 from ....utils.types import HFModel
@@ -31,6 +34,12 @@ from .registry import Registry
 
 
 logger = logging.get_logger(__name__)
+
+
+@dataclass
+class KernelConfig(StrictConfigMixin):
+    name: Literal["auto"] = "auto"
+    include_kernels: str | bool | None = None
 
 
 def scan_all_kernels():
@@ -110,7 +119,7 @@ class KernelPlugin(BasePlugin):
     pass
 
 
-@KernelPlugin("auto").register()
+@KernelPlugin("auto", config=KernelConfig).register()
 def apply_default_kernels(model: HFModel, include_kernels: str = None) -> HFModel:
     """Applies all default registered kernels to the model.
 

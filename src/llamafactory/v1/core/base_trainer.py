@@ -90,14 +90,14 @@ class BaseTrainer:
             self.model.gradient_checkpointing_enable({"use_reentrant": False})
 
         self._deepspeed_engine = None
-        dist_name = self.args.dist_config.name if self.args.dist_config is not None else None
+        dist_name = getattr(self.args.dist_config, "name", None)
 
         if dist_name == "deepspeed":
             from ..plugins.trainer_plugins.distributed.hub import DistributedPlugin
 
             self._deepspeed_engine = DistributedPlugin("deepspeed")(
                 self.model,
-                self.args.dist_config,
+                self.args.dist_config.backend,
                 num_micro_batch=self.train_batch_generator.num_micro_batch,
                 micro_batch_size=self.args.micro_batch_size,
             )
@@ -135,7 +135,8 @@ class BaseTrainer:
             epoch=self._resume_epoch,
         )
 
-        if self.args.dist_config is not None and self.args.dist_config.get("cp_size", 1) > 1:
+        sp_config = getattr(self.args.dist_config, "sp", None)
+        if sp_config is not None and sp_config.cp_size > 1:
             # qwen3.5 is not supported because of the different attention implementation, which will be supported in the future.
             if model.config.model_type == "qwen3_5":
                 raise RuntimeError(
@@ -148,7 +149,7 @@ class BaseTrainer:
                     "Sequence parallelism is optimized for flash attention only. Replace the attention implementation to flash_attention_2."
                 )
                 model.config._attn_implementation = "flash_attention_2"
-            SequenceParallelModelPlugin(self.args.dist_config.get("cp_mode", "ulysses"))(model, self.args.dist_config)
+            SequenceParallelModelPlugin(sp_config.cp_mode)(model, sp_config)
 
     def _create_batch_generator(self) -> None:
         self.train_batch_generator = BatchGenerator(
@@ -177,7 +178,7 @@ class BaseTrainer:
 
             self.model = DistributedPlugin(self.args.dist_config.name)(
                 self.model,
-                self.args.dist_config,
+                self.args.dist_config.backend,
                 bf16=self.args.bf16,
             )
 
@@ -244,8 +245,10 @@ class BaseTrainer:
                 step_valid_tokens = compute_valid_tokens(micro_batches)
                 step_valid_tokens = DistributedInterface().all_reduce(step_valid_tokens, op=ReduceOp.SUM)
                 num_micro = len(micro_batches)
+                _sp = getattr(self.args.dist_config, "sp", None)
+                cp_active = _sp is not None and _sp.cp_size > 1
                 for i, micro_batch in enumerate(micro_batches):
-                    if self.args.dist_config and self.args.dist_config.get("cp_size", 1) > 1:
+                    if cp_active:
                         from ..plugins.model_plugins.parallelization.sequence_parallel import (
                             SequenceParallelLossPlugin,
                         )
@@ -271,7 +274,7 @@ class BaseTrainer:
                 else:
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm).item()
 
-                    if self.args.dist_config and self.args.dist_config.get("cp_size", 1) > 1:
+                    if cp_active:
                         grad_norm = grad_norm**2
                         grad_norm = DistributedInterface().all_reduce(grad_norm, op=ReduceOp.SUM, dim=Dim.CP)
                         grad_norm = grad_norm**0.5
@@ -327,10 +330,11 @@ class BaseTrainer:
 
     def save_model(self) -> None:
         """Save the model."""
-        if self.args.dist_config is not None and self.args.dist_config.name in ("deepspeed", "fsdp2"):
+        dist_name = getattr(self.args.dist_config, "name", None)
+        if dist_name in ("deepspeed", "fsdp2"):
             from ..plugins.trainer_plugins.distributed.hub import DistributedPlugin
 
-            DistributedPlugin(self.args.dist_config.name).save_model(
+            DistributedPlugin(dist_name).save_model(
                 self.model, self.args.output_dir, self.renderer.processor
             )
         else:

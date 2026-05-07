@@ -13,12 +13,15 @@
 # limitations under the License.
 
 import re
-from typing import Literal, TypedDict, Union
+from dataclasses import dataclass
+from typing import Literal, Union
 
 import torch
-from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from peft import LoraConfig as PeftLoraConfig
+from peft import PeftModel, TaskType, get_peft_model
 
 from ...config import InputArgument, get_args
+from ...config.arg_utils import StrictConfigMixin
 from ...core.model_engine import ModelEngine
 from ...utils import logging
 from ...utils.plugin import BasePlugin
@@ -28,52 +31,35 @@ from ...utils.types import HFModel
 logger = logging.get_logger(__name__)
 
 
-class LoraConfigDict(TypedDict, total=False):
-    name: Literal["lora"]
-    """Plugin name."""
-    r: int
-    """Lora rank."""
-    lora_alpha: int
-    """Lora alpha."""
-    lora_dropout: float
-    """Lora dropout."""
-    target_modules: Union[list[str], str]
-    """Target modules."""
-    use_rslora: bool
-    """Use RS-LoRA."""
-    use_dora: bool
-    """Use DoRA."""
-    modules_to_save: list[str]
-    """Modules to save."""
-    adapter_name_or_path: Union[list[str], str]
-    """Path to the adapter(s)."""
-    export_dir: str
-    """Path to the export directory."""
-    export_size: int
-    """Shard size for the export model."""
-    export_hub_model_id: str
-    """Hub model ID for the export model."""
-    infer_dtype: Literal["auto", "float16", "float32", "bfloat16"]
-    """Inference data type for the export model."""
-    export_legacy_format: bool
-    """Use legacy format for the export model."""
+@dataclass
+class LoraConfig(StrictConfigMixin):
+    name: Literal["lora"] = "lora"
+    r: int = 8
+    lora_alpha: int = 16
+    lora_dropout: float = 0.05
+    target_modules: Union[list[str], str] = "all"
+    use_rslora: bool = False
+    use_dora: bool = False
+    modules_to_save: Union[list[str], str, None] = None
+    adapter_name_or_path: Union[list[str], str, None] = None
+    export_dir: str | None = None
+    export_size: int = 5
+    export_hub_model_id: str | None = None
+    infer_dtype: Literal["auto", "float16", "float32", "bfloat16"] = "auto"
+    export_legacy_format: bool = False
 
 
-class FreezeConfigDict(TypedDict, total=False):
-    name: Literal["freeze"]
-    """Plugin name."""
-    freeze_trainable_layers: int
-    """Freeze trainable layers."""
-    freeze_trainable_modules: Union[list[str], str]
-    """Freeze trainable modules."""
-    freeze_extra_modules: list[str]
-    """Freeze extra modules."""
-    cast_trainable_params_to_fp32: bool
-    """Cast trainable params to fp32."""
+@dataclass
+class FreezeConfig(StrictConfigMixin):
+    name: Literal["freeze"] = "freeze"
+    freeze_trainable_layers: int = 2
+    freeze_trainable_modules: Union[list[str], str] = "all"
+    freeze_extra_modules: Union[list[str], str, None] = None
+    cast_trainable_params_to_fp32: bool = True
 
 
 class PeftPlugin(BasePlugin):
-    def __call__(self, model: HFModel, config: dict, is_train: bool) -> HFModel:
+    def __call__(self, model: HFModel, config: StrictConfigMixin, is_train: bool) -> HFModel:
         return super().__call__(model, config, is_train)
 
 
@@ -148,18 +134,14 @@ def load_adapter(model: HFModel, adapter_name_or_path: Union[list[str], str], is
     return model
 
 
-@PeftPlugin("lora").register()
-def get_lora_model(model: HFModel, config: LoraConfigDict, is_train: bool = False) -> HFModel:
-    adapter_name_or_path = config.get("adapter_name_or_path")
-
-    if adapter_name_or_path:
-        return load_adapter(model, adapter_name_or_path, is_train)
+@PeftPlugin("lora", config=LoraConfig, aliases={"lora_rank": "r"}).register()
+def get_lora_model(model: HFModel, config: LoraConfig, is_train: bool = False) -> HFModel:
+    if config.adapter_name_or_path:
+        return load_adapter(model, config.adapter_name_or_path, is_train)
 
     logger.info_rank0("Fine-tuning method: LoRA")
 
-    target_modules = config.get("target_modules", "all")
-
-    # Handle target modules
+    target_modules = config.target_modules
     if target_modules == "all":
         target_modules = _find_all_linear_modules(model)
     elif isinstance(target_modules, str):
@@ -167,16 +149,16 @@ def get_lora_model(model: HFModel, config: LoraConfigDict, is_train: bool = Fals
 
     logger.info_rank0(f"LoRA target modules: {target_modules}")
 
-    peft_config = LoraConfig(
+    peft_config = PeftLoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=not is_train,
-        r=config.get("r", 8),
-        lora_alpha=config.get("lora_alpha", 16),
-        lora_dropout=config.get("lora_dropout", 0.05),
-        use_rslora=config.get("use_rslora", False),
-        use_dora=config.get("use_dora", False),
+        r=config.r,
+        lora_alpha=config.lora_alpha,
+        lora_dropout=config.lora_dropout,
+        use_rslora=config.use_rslora,
+        use_dora=config.use_dora,
         target_modules=target_modules,
-        modules_to_save=config.get("modules_to_save", None),
+        modules_to_save=config.modules_to_save,
     )
 
     model = get_peft_model(model, peft_config)
@@ -187,17 +169,17 @@ def get_lora_model(model: HFModel, config: LoraConfigDict, is_train: bool = Fals
     return model
 
 
-@PeftPlugin("freeze").register()
-def get_freeze_model(model: HFModel, config: FreezeConfigDict, is_train: bool = False) -> HFModel:
+@PeftPlugin("freeze", config=FreezeConfig).register()
+def get_freeze_model(model: HFModel, config: FreezeConfig, is_train: bool = False) -> HFModel:
     logger.info_rank0("Fine-tuning method: Freeze")
 
     if not is_train:
         return model
 
-    freeze_trainable_layers = config.get("freeze_trainable_layers", 2)
-    freeze_trainable_modules = config.get("freeze_trainable_modules", ["all"])
-    freeze_extra_modules = config.get("freeze_extra_modules", [])
-    cast_trainable_params_to_fp32 = config.get("cast_trainable_params_to_fp32", True)
+    freeze_trainable_layers = config.freeze_trainable_layers
+    freeze_trainable_modules = config.freeze_trainable_modules
+    freeze_extra_modules = config.freeze_extra_modules or []
+    cast_trainable_params_to_fp32 = config.cast_trainable_params_to_fp32
 
     if isinstance(freeze_trainable_modules, str):
         freeze_trainable_modules = [module.strip() for module in freeze_trainable_modules.split(",")]
@@ -284,30 +266,26 @@ def get_freeze_model(model: HFModel, config: FreezeConfigDict, is_train: bool = 
 def merge_and_export_model(args: InputArgument = None):
     model_args, _, _, _ = get_args(args)
 
+    # Force ModelEngine to parse the raw peft_config dict into our LoraConfig dataclass
+    # by going through the engine first; that gives us a typed export_config below.
+    model_engine = ModelEngine(model_args, is_train=False)
     export_config = model_args.peft_config
     if export_config is None:
         raise ValueError("Please specify peft_config to merge and export model.")
-
-    export_dir = export_config.get("export_dir")
-    if export_dir is None:
-        raise ValueError("Please specify export_dir.")
-
-    export_size = export_config.get("export_size", 5)
-    export_hub_model_id = export_config.get("export_hub_model_id")
-    infer_dtype = export_config.get("infer_dtype", "auto")
-    export_legacy_format = export_config.get("export_legacy_format", False)
-
-    adapters = None
-    if export_config.get("name") == "lora":
-        adapters = export_config.get("adapter_name_or_path")
-    else:
+    if export_config.name != "lora":
         raise ValueError("Currently merge and export model function is only supported for lora.")
-
-    if adapters is None:
+    if not export_config.export_dir:
+        raise ValueError("Please specify export_dir.")
+    if export_config.adapter_name_or_path is None:
         raise ValueError("Please set adapter_name_or_path to merge adapters into base model.")
 
+    export_dir = export_config.export_dir
+    export_size = export_config.export_size
+    export_hub_model_id = export_config.export_hub_model_id
+    infer_dtype = export_config.infer_dtype
+    export_legacy_format = export_config.export_legacy_format
+
     logger.info_rank0("Loading model for export...")
-    model_engine = ModelEngine(model_args, is_train=False)
     model = model_engine.model
     tokenizer = model_engine.processor
 

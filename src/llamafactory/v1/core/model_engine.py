@@ -61,6 +61,7 @@ class ModelEngine:
         """Model arguments."""
         self.is_train = is_train
         """Whether to train the model."""
+        self._parse_plugin_configs()
         self.processor = self._init_processor()
         """Tokenizer or multi-modal processor."""
         self.renderer = Renderer(self.args.template, self.processor)
@@ -71,14 +72,16 @@ class ModelEngine:
         self._deepspeed_zero3_plugin = None
         self._deepspeed_zero3_enabled = False
 
-        if self.is_train and self._dist_config is not None and self._dist_config.get("name") == "deepspeed":
+        if self.is_train and getattr(self._dist_config, "name", None) == "deepspeed":
             from ..plugins.model_plugins.deepspeed_utils import (
                 setup_deepspeed_zero3_model_loading,
                 teardown_deepspeed_zero3_model_loading,
             )
 
             try:
-                self._deepspeed_zero3_plugin = setup_deepspeed_zero3_model_loading(self.is_train, self._dist_config)
+                self._deepspeed_zero3_plugin = setup_deepspeed_zero3_model_loading(
+                    self.is_train, self._dist_config.backend
+                )
                 self._deepspeed_zero3_enabled = self._deepspeed_zero3_plugin is not None
                 self.model = self._init_model()
             finally:
@@ -87,6 +90,15 @@ class ModelEngine:
                 self._deepspeed_zero3_enabled = False
         else:
             self.model = self._init_model()
+
+    def _parse_plugin_configs(self) -> None:
+        """Parse model plugin configs into their strict dataclass schemas.
+
+        Idempotent: re-parsing an already-parsed dataclass is a no-op.
+        """
+        from .utils.config_parsing import parse_model_plugin_configs
+
+        parse_model_plugin_configs(self.args)
 
     def _init_processor(self) -> Processor:
         """Init processor.
@@ -172,18 +184,17 @@ class ModelEngine:
             else:
                 logger.info_rank0("Inference the original model")
         else:
-            if self.args.peft_config.name == "lora" and init_mode == "init_on_meta":
-                raise ValueError("Currently lora stage does not support loading model by meta.")
-
             from ..plugins.model_plugins.peft import PeftPlugin
 
+            # Cross-slot constraints (e.g. lora + init_on_meta forbidden) are validated
+            # centrally in core/utils/cross_slot_validation.py before model construction.
             model = PeftPlugin(self.args.peft_config.name)(model, self.args.peft_config, self.is_train)
 
         if self.args.kernel_config is not None:
             from ..plugins.model_plugins.kernels.interface import KernelPlugin
 
             model = KernelPlugin(self.args.kernel_config.name)(
-                model, include_kernels=self.args.kernel_config.get("include_kernels")
+                model, include_kernels=self.args.kernel_config.include_kernels
             )
 
         return model

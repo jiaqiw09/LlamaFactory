@@ -35,7 +35,7 @@ from torch.distributed import barrier, destroy_process_group, init_process_group
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from ..utils import logging
-from ..utils.types import DistributedConfig, ProcessGroup, TensorLike
+from ..utils.types import ProcessGroup, TensorLike
 from . import helper
 
 
@@ -119,11 +119,19 @@ class DistributedInterface:
 
         return cls._instance
 
-    def __init__(self, config: DistributedConfig | None = None) -> None:
+    def __init__(self, dist_config: Any | None = None) -> None:
+        """Initialize the singleton.
+
+        Args:
+            dist_config: A :class:`DistConfig` façade produced by
+                ``DistributedPlugin.parse_config``. Internally exposes
+                ``.backend`` (FSDP2/DeepSpeed/...) and ``.sp`` (SequenceParallelConfig).
+                ``None`` is allowed for non-distributed runs.
+        """
         if self._initialized:
             return
 
-        self.dist_config = config
+        self.dist_config = dist_config
 
         helper.set_device_index()
         self._is_distributed = helper.is_distributed()
@@ -134,17 +142,21 @@ class DistributedInterface:
         self.current_device = helper.get_current_device()
         self.device_count = helper.get_device_count()
 
-        if config is None:
-            self.strategy = DistributedStrategy()
-            timeout = 18000
-        else:
-            self.strategy = DistributedStrategy(
-                mp_replicate_size=config.get("mp_replicate_size", 1),
-                mp_shard_size=config.get("mp_shard_size", None),
-                dp_size=config.get("dp_size", None),
-                cp_size=config.get("cp_size", 1),
-            )
-            timeout = config.get("timeout", 18000)
+        backend = getattr(dist_config, "backend", None)
+        sp = getattr(dist_config, "sp", None)
+
+        cp_size = getattr(sp, "cp_size", 1) if sp is not None else 1
+        timeout = getattr(backend, "timeout", 18000) if backend is not None else 18000
+        dp_size = getattr(backend, "dp_size", None) if backend is not None else None
+        mp_replicate_size = getattr(backend, "mp_replicate_size", 1) if backend is not None else 1
+        mp_shard_size = getattr(backend, "mp_shard_size", None) if backend is not None else None
+
+        self.strategy = DistributedStrategy(
+            mp_replicate_size=mp_replicate_size,
+            mp_shard_size=mp_shard_size,
+            dp_size=dp_size,
+            cp_size=cp_size,
+        )
 
         if self._is_distributed:
             init_process_group(timeout=timedelta(seconds=timeout), backend=helper.get_process_group_backend())

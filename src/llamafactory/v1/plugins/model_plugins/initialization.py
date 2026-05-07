@@ -13,11 +13,24 @@
 # limitations under the License.
 
 
+from dataclasses import dataclass
+from typing import Literal
+
 import torch
 
 from ...accelerator.helper import DeviceType
 from ...accelerator.interface import DistributedInterface
+from ...config.arg_utils import StrictConfigMixin
 from ...utils.plugin import BasePlugin
+
+
+@dataclass
+class InitConfig(StrictConfigMixin):
+    """Init-device strategy. Variants are kept in one dataclass until they
+    actually grow divergent fields — splitting into per-variant classes ahead of
+    that just adds maintenance cost."""
+
+    name: Literal["init_on_meta", "init_on_rank0", "init_on_default"] = "init_on_default"
 
 
 class InitPlugin(BasePlugin):
@@ -25,12 +38,13 @@ class InitPlugin(BasePlugin):
         return super().__call__()
 
 
-@InitPlugin("init_on_meta").register()
+# All three variants share the same config dataclass, hence the same ``config=InitConfig``.
+@InitPlugin("init_on_meta", config=InitConfig).register()
 def init_on_meta() -> torch.device:
     return torch.device(DeviceType.META.value)
 
 
-@InitPlugin("init_on_rank0").register()
+@InitPlugin("init_on_rank0", config=InitConfig).register()
 def init_on_rank0() -> torch.device:
     if DistributedInterface().get_rank() == 0:
         return torch.device(DeviceType.CPU.value)
@@ -38,6 +52,6 @@ def init_on_rank0() -> torch.device:
         return torch.device(DeviceType.META.value)
 
 
-@InitPlugin("init_on_default").register()
+@InitPlugin("init_on_default", config=InitConfig).register()
 def init_on_default() -> torch.device:
     return DistributedInterface().current_device

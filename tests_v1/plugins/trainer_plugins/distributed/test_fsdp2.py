@@ -25,6 +25,7 @@ from llamafactory.v1.accelerator.interface import DistributedInterface
 from llamafactory.v1.config.arg_parser import get_args
 from llamafactory.v1.core.model_engine import ModelEngine
 from llamafactory.v1.plugins.trainer_plugins.distributed.fsdp2 import FSDP2Engine
+from llamafactory.v1.plugins.trainer_plugins.distributed.hub import FSDP2Config
 
 
 TINY_MODEL = "llamafactory/tiny-random-qwen3"
@@ -49,14 +50,12 @@ def test_fsdp2_meta_loading_buffers_and_tied_weights():
 
     # 2. Build FSDP2Engine config
     engine = FSDP2Engine(
-        {
-            "name": "fsdp2",
-            "mixed_precision": "bf16",
-            "reshard_after_forward": True,
-            "offload_params": False,
-            "pin_memory": False,
-            "dcp_path": None,
-        }
+        FSDP2Config(
+            reshard_after_forward=True,
+            offload_params=False,
+            pin_memory=False,
+            dcp_path=None,
+        )
     )
 
     config = AutoConfig.from_pretrained(TINY_MODEL)

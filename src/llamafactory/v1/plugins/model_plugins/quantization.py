@@ -15,12 +15,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from transformers import BitsAndBytesConfig
 
 from ...accelerator.helper import get_current_device
+from ...config.arg_utils import StrictConfigMixin
 from ...config.model_args import ModelArguments
 from ...utils import logging
 from ...utils.packages import check_version
@@ -31,6 +33,30 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig, PreTrainedTokenizer
 
 logger = logging.get_logger(__name__)
+
+
+@dataclass
+class QuantConfig(StrictConfigMixin):
+    """Quantization config. ``auto`` and ``bnb`` share the same fields today;
+    they remain a single dataclass until a variant grows divergent fields."""
+
+    name: Literal["auto", "bnb"] = "auto"
+    quantization_bit: int | None = None
+    compute_dtype: str | torch.dtype | None = None
+    double_quantization: bool = True
+    quantization_type: Literal["nf4", "fp4"] = "nf4"
+
+
+def _resolve_compute_dtype(compute_dtype: str | torch.dtype | None) -> torch.dtype:
+    if compute_dtype is None:
+        return torch.float16
+    elif isinstance(compute_dtype, str):
+        if not hasattr(torch, compute_dtype):
+            raise ValueError(f"Unknown torch dtype: {compute_dtype}.")
+
+        return getattr(torch, compute_dtype)
+    else:
+        return compute_dtype
 
 
 class QuantizationPlugin(BasePlugin):
@@ -49,35 +75,28 @@ class QuantizationPlugin(BasePlugin):
         )
 
 
-@QuantizationPlugin("auto").register()
+@QuantizationPlugin("auto", config=QuantConfig).register()
 def quantization_auto(
     init_kwargs: dict[str, Any],
     **kwargs,
 ) -> dict[str, Any]:
-    """Automatic quantization selection, only support bnb currently.
-
-    Args:
-        init_kwargs (dict[str, Any]): The kwargs for model initialization.
-        **kwargs: Keyword arguments containing the model.
-
-    Returns:
-        dict[str, Any]: The updated kwargs for model initialization.
-    """
+    """Automatic quantization selection. Currently dispatches to bnb."""
     model_args: ModelArguments = kwargs.get("model_args", None)
-    quant_config = model_args.quant_config
+    quant_config: QuantConfig = model_args.quant_config
 
-    quantization_bit = quant_config.get("quantization_bit", None)
-    if quantization_bit is not None:
-        logger.info_rank0(f"Loading {quantization_bit}-bit quantized model.")
-        if quantization_bit in [8, 4]:
+    if quant_config.quantization_bit is not None:
+        logger.info_rank0(f"Loading {quant_config.quantization_bit}-bit quantized model.")
+        if quant_config.quantization_bit in (8, 4):
             return quantization_with_bnb(init_kwargs, **kwargs)
         else:
-            raise ValueError(f"Unsupported quantization bit: {quantization_bit} for auto quantization.")
+            raise ValueError(
+                f"Unsupported quantization bit: {quant_config.quantization_bit} for auto quantization."
+            )
     logger.warning_rank0("No quantization method applied.")
     return init_kwargs
 
 
-@QuantizationPlugin("bnb").register()
+@QuantizationPlugin("bnb", config=QuantConfig).register()
 def quantization_with_bnb(
     init_kwargs: dict[str, Any],
     model_args: "ModelArguments" = None,
@@ -85,27 +104,27 @@ def quantization_with_bnb(
 ) -> dict[str, Any]:
     r"""Quantization with BNB."""
     logger.info_rank0("Using Bitsandbytes quantization.")
-    quantization_bit = model_args.quant_config.get("quantization_bit", None)
+    quant_config: QuantConfig = model_args.quant_config
+    quantization_bit = quant_config.quantization_bit
     if quantization_bit is None:
-        logger.warning_rank0("quantization_bit is not specified, default to 8-bit quantization.")
+        logger.warning_rank0("quantization_bit is not specified, default to 4-bit quantization.")
         quantization_bit = 4
-    assert quantization_bit in [8, 4], "Bitsandbytes only accepts 4-bit or 8-bit quantization."
+    if quantization_bit not in (8, 4):
+        raise ValueError("Bitsandbytes only accepts 4-bit or 8-bit quantization.")
+
     if quantization_bit == 8:
         check_version("bitsandbytes>=0.37.0", mandatory=True)
         init_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-    elif quantization_bit == 4:
+    else:  # 4-bit
         check_version("bitsandbytes>=0.39.0", mandatory=True)
+        compute_dtype = _resolve_compute_dtype(quant_config.compute_dtype)
         init_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=model_args.quant_config.get("compute_dtype", torch.float16),
-            bnb_4bit_use_double_quant=model_args.quant_config.get("double_quantization", True),
-            bnb_4bit_quant_type=model_args.quant_config.get("quantization_type", "nf4"),
-            bnb_4bit_quant_storage=model_args.quant_config.get(
-                "compute_dtype", torch.float16
-            ),  # crucial for fsdp+qlora
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=quant_config.double_quantization,
+            bnb_4bit_quant_type=quant_config.quantization_type,
+            bnb_4bit_quant_storage=compute_dtype,  # crucial for fsdp+qlora
         )
-    else:
-        raise ValueError("Bitsandbytes only accepts 4-bit or 8-bit quantization.")
 
     # TODO: improve deepspeed zero3 and fsdp detection.
     if kwargs.get("is_trainable", False):
@@ -113,10 +132,10 @@ def quantization_with_bnb(
         init_kwargs["device_map"] = {"": get_current_device()}  # change auto device map for inference
     else:
         logger.info_rank0("Detected training mode, skip setting device_map for bitsandbytes quantization.")
-        if model_args.quant_config.get("quantization_bit") != 4:
+        if quantization_bit != 4:
             raise ValueError("Only 4-bit quantized model can use fsdp+qlora or auto device map.")
 
         check_version("bitsandbytes>=0.43.0", mandatory=True)
 
-    logger.info_rank0(f"Quantizing model to {model_args.quant_config.get('quantization_bit')} bit with bitsandbytes.")
+    logger.info_rank0(f"Quantizing model to {quantization_bit} bit with bitsandbytes.")
     return init_kwargs

@@ -15,7 +15,7 @@
 
 from dataclasses import dataclass, field
 
-from .arg_utils import ModelClass, PluginConfig, get_plugin_config
+from .arg_utils import ModelClass, PluginConfig, normalize_plugin_argument
 
 
 @dataclass
@@ -54,7 +54,10 @@ class ModelArguments:
     )
 
     def __post_init__(self) -> None:
-        self.init_config = get_plugin_config(self.init_config)
-        self.peft_config = get_plugin_config(self.peft_config)
-        self.kernel_config = get_plugin_config(self.kernel_config)
-        self.quant_config = get_plugin_config(self.quant_config)
+        # Only normalize raw input shape here. Strict per-slot dataclass parsing is
+        # performed lazily by ``ModelEngine`` so that the config layer does not
+        # depend on the plugin layer.
+        self.init_config = normalize_plugin_argument(self.init_config)
+        self.peft_config = normalize_plugin_argument(self.peft_config)
+        self.kernel_config = normalize_plugin_argument(self.kernel_config)
+        self.quant_config = normalize_plugin_argument(self.quant_config)

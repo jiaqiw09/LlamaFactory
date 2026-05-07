@@ -17,7 +17,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llamafactory.v1.plugins.model_plugins import peft as peft_module
-from llamafactory.v1.plugins.model_plugins.peft import merge_and_export_model
+from llamafactory.v1.plugins.model_plugins.peft import FreezeConfig, LoraConfig as StrictLoraConfig, merge_and_export_model
 
 
 TINY_MODEL = "llamafactory/tiny-random-qwen3"
@@ -66,7 +66,7 @@ def test_find_all_linear_modules(model):
 
 def test_get_lora_model(model):
     """Verify a PeftModel is returned and LoRA config takes effect."""
-    config = {"name": "lora", "r": 8, "target_modules": "all", "lora_alpha": 16}
+    config = StrictLoraConfig(r=8, target_modules="all", lora_alpha=16)
     model = peft_module.get_lora_model(model, config, is_train=True)
     assert isinstance(model, PeftModel)
     assert model.peft_config["default"].r == 8
@@ -76,7 +76,7 @@ def test_get_lora_model(model):
 def test_get_freeze_model_layers(model):
     """Verify layer-wise freezing: only the last layer stays trainable."""
     # Freeze all but last layer
-    config = {"name": "freeze", "freeze_trainable_layers": 1, "freeze_trainable_modules": "all"}
+    config = FreezeConfig(freeze_trainable_layers=1, freeze_trainable_modules="all")
 
     # Ensure we start with something known
     model = peft_module.get_freeze_model(model, config, is_train=True)
@@ -94,7 +94,7 @@ def test_get_freeze_model_layers(model):
 def test_get_freeze_model_modules(model):
     """Verify module-wise freezing: only last-layer self_attn is trainable."""
     # Freeze specific modules (e.g. only self_attn)
-    config = {"name": "freeze", "freeze_trainable_layers": 1, "freeze_trainable_modules": "self_attn"}
+    config = FreezeConfig(freeze_trainable_layers=1, freeze_trainable_modules="self_attn")
     model = peft_module.get_freeze_model(model, config, is_train=True)
 
     num_layers = model.config.num_hidden_layers
