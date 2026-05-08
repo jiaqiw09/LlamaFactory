@@ -186,7 +186,6 @@ class BaseTrainer:
 
         log_probs: Tensor of shape (batch_size, seq_len - 1)
         """
-        #todo dpo: keep or extend this helper for sequence-level chosen/rejected log-prob aggregation.
         batch_size, _ = batch["labels"].shape
         model_inputs = {
             k: v.to(self.device, non_blocking=True) for k, v in batch.items() if isinstance(v, torch.Tensor)
@@ -199,8 +198,12 @@ class BaseTrainer:
         return -F.cross_entropy(shift_logits, shift_labels, reduction="none").view(batch_size, -1)
 
     @abstractmethod
-    def compute_loss(self, batch: BatchInput) -> Tensor:
-        """Compute the scalar loss."""
+    def compute_loss(self, batch: BatchInput) -> Tensor | tuple[Tensor, dict[str, float]]:
+        """Compute the scalar loss.
+
+        Subclasses may return either a scalar loss tensor or a (loss, metrics) tuple
+        where metrics is a flat dict of float scalars to be logged alongside loss.
+        """
         ...
 
     def fit(self) -> None:
@@ -219,6 +222,7 @@ class BaseTrainer:
                 self.callback_handler.on_step_begin(self.args, self.state)
 
                 step_loss = 0
+                step_extra_metrics: dict[str, float] = {}
                 step_valid_tokens = compute_valid_tokens(micro_batches)
                 step_valid_tokens = DistributedInterface().all_reduce(step_valid_tokens, op=ReduceOp.SUM)
                 num_micro = len(micro_batches)
@@ -231,6 +235,11 @@ class BaseTrainer:
                         loss = SequenceParallelLossPlugin("sequence_parallel_loss")(self.model, micro_batch)
                     else:
                         loss = self.compute_loss(micro_batch)
+
+                    if isinstance(loss, tuple):
+                        loss, extra_metrics = loss
+                        for k, v in extra_metrics.items():
+                            step_extra_metrics[k] = step_extra_metrics.get(k, 0.0) + v / num_micro
                     mini_step_valid_tokens = compute_valid_tokens([micro_batch])
                     # fsdp uses mean reduction so we need to scale the loss by dp_size
                     loss = loss * mini_step_valid_tokens * self.dp_size / (step_valid_tokens + 1e-6)
@@ -276,6 +285,10 @@ class BaseTrainer:
                     self.optimizer.zero_grad()
 
                 step_loss, grad_norm = DistributedInterface().all_reduce([step_loss, grad_norm])
+                if step_extra_metrics:
+                    keys = list(step_extra_metrics.keys())
+                    values = DistributedInterface().all_reduce([step_extra_metrics[k] for k in keys])
+                    step_extra_metrics = dict(zip(keys, values))
                 DistributedInterface().sync()
 
                 # Update state with step metrics
@@ -299,7 +312,7 @@ class BaseTrainer:
                         "grad_norm": grad_norm,
                         "learning_rate": current_lr,
                     }
-                    #todo dpo: allow trainers to inject DPO-specific metrics such as reward margin and pair accuracy.
+                    logs.update(step_extra_metrics)
                     self.callback_handler.on_log(self.args, self.state, logs)
 
                 # Check if max_steps is reached
