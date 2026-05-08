@@ -1,95 +1,105 @@
 # DataEngine
 
-DataEngine 是 LLaMA-Factory v1 数据处理的核心类，继承自 PyTorch 的 `Dataset`，负责数据集的加载、索引构建和格式转换。数据加载和格式转换通过插件机制实现，DataEngine 本身只负责协调这些步骤。
+`DataEngine` 是 v1 数据访问的统一入口。它继承 `torch.utils.data.Dataset`，对外只暴露 `__getitem__` 和 `__len__`，内部把"读什么、怎么读、怎么转换"三件事拆成可替换的步骤。
 
-DataEngine 接受一个唯一入参：`dataset_path: str`。
+代码位置：`src/llamafactory/v1/core/data_engine.py`。
 
-## 接口定义
+## 接口
 
 ```python
 class DataEngine(Dataset):
-    attr:
-        path (str): 数据集路径
-        datasets (dict[str, HFDataset]): 数据集名称到数据对象的映射
-        dataset_infos (dict[str, DatasetInfo]): 数据集名称到元信息的映射
-        data_index (list[tuple[str, int]]): 数据索引列表
-        streaming (bool): 是否为流式数据集
-
-    def __init__(self, dataset_path: str) -> None:
-        """初始化时自动执行：
-            1. _get_dataset_info — 解析数据集元信息
-            2. _load_dataset — 根据配置加载数据集
-            3. _build_data_index — 构建统一的索引列表
-        """
+    def __init__(self, dataset_path: str) -> None: ...
+    def __len__(self) -> int: ...
+    def __getitem__(self, index) -> Sample | list[Sample]: ...
 ```
 
-`dataset_path` 支持以下格式：
+属性：
 
-- 本地 YAML 配置文件路径（`dataset_info.yaml`）
-- HuggingFace Hub 上的 YAML 配置文件路径（如 `repo_id/dataset_info.yaml`）
-- 本地数据集文件路径（`.json`、`.jsonl` 等，需为标准格式）
-- HuggingFace Hub 数据集 repo id
+| 属性 | 含义 |
+|------|------|
+| `path` | 入参 `dataset_path` 原值 |
+| `dataset_infos` | `dict[name, DatasetInfo]`，每个数据源的配置 |
+| `datasets` | `dict[name, HFDataset]`，已加载的数据 |
+| `data_index` | `list[(name, sample_index)]`，全局采样索引 |
+| `streaming` | 是否流式 |
 
-## 核心方法
+## 初始化流程
+
+```text
+__init__(dataset_path)
+  1. _get_dataset_info()   解析 dataset_path 形态，填充 dataset_infos
+  2. _load_dataset()       按 source 字段把每个数据源装载进 datasets
+  3. _build_data_index()   拉平成 (name, idx) 索引，必要时按 size/weight 重采样
+```
 
 ### _get_dataset_info
 
-根据 `dataset_path` 判断数据源类型并加载数据集配置，在实例化时自动调用。
+按 `dataset_path` 字符串形态分派：
 
-| `dataset_path` 格式 | 判定 | 处理方式 |
-|---------------------|------|---------|
-| 以 `.yaml` 结尾且为本地文件 | 本地 YAML 配置 | `OmegaConf.load(path)` |
-| 以 `.yaml` 结尾但非本地文件 | HF Hub YAML 配置 | `hf_hub_download` + `OmegaConf.load` |
-| 本地路径存在 | 本地数据文件/目录 | `{"default": {"path": path, "source": "local"}}` |
-| 其他 | HF Hub 数据集 | `{"default": {"path": path}}` |
+| 形态 | 加载方式 | dataset_infos 内容 |
+|------|---------|---------------------|
+| 本地 `.yaml` 文件 | `OmegaConf.load(path)` | YAML 内全部条目 |
+| HF Hub 上的 `.yaml` | `hf_hub_download` 后 `OmegaConf.load` | YAML 内全部条目 |
+| 本地存在的路径（非 YAML） | 单条目 | `{"default": {"path": ..., "source": "local"}}` |
+| 其它（视为 HF Hub repo id） | 单条目 | `{"default": {"path": ...}}`（默认 `source=hf_hub`） |
+
+YAML 形态的字段定义见 [DatasetInfo](../../parameter-reference/dataset_info.md)。
 
 ### _load_dataset
 
-遍历所有数据源，根据 `source` 字段选择加载方式，在实例化时自动调用。
+streaming 必须全开或全关：若部分条目 `streaming=true`、其它不是，会直接 `ValueError`。
 
 ```python
-for dataset_name, dataset_info in self.dataset_infos.items():
-    split = dataset_info.get("split", "train")
-    if dataset_info.get("source", "hf_hub") == "hf_hub":
-        self.datasets[dataset_name] = load_dataset(dataset_info["path"], split=split, streaming=self.streaming)
-    else:
-        self.datasets[dataset_name] = DataLoaderPlugin(dataset_info["source"]).load(dataset_info)
+if dataset_info.get("source", "hf_hub") == "hf_hub":
+    datasets[name] = load_dataset(path, split=split, streaming=streaming)
+else:
+    datasets[name] = DataLoaderPlugin(source).load(dataset_info)
 ```
+
+`source != "hf_hub"` 时走 [DataLoaderPlugin](../plugins/data_plugins.md)；目前内置 `local` 一种实现。
 
 ### _build_data_index
 
-为每个数据集创建索引列表 `[(dataset_name, sample_index), ...]`，在实例化时自动调用。当配置了 `size` 或 `weight` 时，调用 `adjust_data_index()` 调整索引分布。
+非流式：`[(name, 0), (name, 1), ...]`，长度等于该数据集真实样本数。
+流式：固定填 1000 个 `(name, -1)` 占位（仅用于让 `__len__` 有值，索引不真实使用）。
 
-### _convert_data_sample
+`size` 或 `weight` 字段任一非空时，调用 `adjust_data_index`：
 
-将原始数据转换为标准格式，`DataConverterPlugin` 插件在此处被调用。若 `converter` 为空则假定数据集为标准格式。由 `__getitem__` 调用。
+- `size`：`random.choices(data_index, k=size)`，可上采样也可下采样
+- `weight`：`random.choices(data_index, k=int(len(data_index) * weight))`，按比例放缩
+
+最后所有数据集的索引拼接成 `self.data_index`，供后续 sampler 索引。
+
+## 取样
 
 ```python
-def _convert_data_sample(self, raw_sample: dict, dataset_name: str) -> Sample:
-    converter = self.dataset_infos[dataset_name].get("converter")
-    if converter is not None:
-        return {"_dataset_name": dataset_name, **DataConverterPlugin(converter)(raw_sample)}
+def __getitem__(self, index):
+    if self.streaming:
+        raise ValueError("Streaming dataset does not support index access.")
+
+    if isinstance(index, int):
+        name, sample_idx = self.data_index[index]
+        return self._convert_data_sample(self.datasets[name][sample_idx], name)
     else:
-        return {"_dataset_name": dataset_name, **raw_sample}
+        # 切片或 list[int]：走 select_data_sample
+        ...
 ```
 
-## 初始化示例
+`_convert_data_sample` 依据 `dataset_infos[name]["converter"]` 决定走哪个 [DataConverterPlugin](../plugins/data_plugins.md)；不指定 converter 时假定数据已经是统一格式，直接附加 `_dataset_name` 字段返回。
+
+## 注意事项
+
+- `__iter__` 当前抛 `NotImplementedError`：流式访问尚未实现，外部全部走 `__getitem__`
+- `_dataset_name` 字段会被注入到样本里，便于训练循环按数据集打标
+- DataEngine 与模型/分词器无关，转 token 的工作交给 `Renderer`，由 `BatchGenerator` 在 `collate_fn` 里调用
+
+## 示例
 
 ```python
 from llamafactory.v1.core.data_engine import DataEngine
 
-data_engine = DataEngine(dataset_path="data/v1_sft_demo.yaml")
-sample = data_engine[0]
+engine = DataEngine("data/v1_sft_demo.yaml")
+print(len(engine))     # 总样本数（已按 size / weight 调整）
+print(engine[0])       # 一条 Sample
+print(engine[0:4])     # list[Sample]
 ```
-
-## 数据访问
-
-实例化后的 DataEngine 支持整数索引、列表索引和切片访问：
-
-```python
-sample = data_engine[0]
-samples = data_engine[0:10]
-samples = data_engine[[0, 5, 10]]
-```
-
-流式数据集不支持索引访问，调用 `__getitem__` 会抛出 `ValueError`。

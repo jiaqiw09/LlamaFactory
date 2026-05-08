@@ -1,39 +1,55 @@
 # 融合算子
 
-LLaMA-Factory 通过 Kernel 插件系统管理融合算子实现。这些算子位于 `src/llamafactory/v1/plugins/model_plugins/kernels/ops` 目录下。
+`kernels/ops/` 目录下每个子目录对应一类算子。`scan_all_kernels` 在启动时扫描整个目录，把当前设备能用的实现注册进 `Registry`。
 
-系统启动时，`scan_all_kernels` 函数会自动扫描该目录，注册所有与当前硬件匹配的算子。可以通过 `apply_default_kernels(model, include_kernels="auto")` 启用默认算子，也可以使用 `apply_kernel` 单独启用某个算子。
+代码位置：`src/llamafactory/v1/plugins/model_plugins/kernels/ops/`。
 
-## 算子类型
+## 算子分类
 
-当前支持的融合算子按功能分为以下几类：
+| 子目录 | 替换目标 | 说明 |
+|--------|----------|------|
+| `mlp/` | 各种 `*MLP` 模块 | SwiGLU、Fused MoE |
+| `rms_norm/` | 各种 `*RMSNorm` 模块 | 融合 RMSNorm |
+| `rope/` | 旋转位置编码 | 融合 RoPE |
 
-| 类别 | 目录 | 功能 |
-|------|------|------|
-| MLP | `ops/mlp/` | SwiGLU、MoE 等融合算子 |
-| RMS Norm | `ops/rms_norm/` | RMSNorm 融合算子 |
-| RoPE | `ops/rope/` | 旋转位置编码融合算子 |
+## 仓库内置 kernel
 
-每个算子通过 `@register_kernel` 装饰器注册，声明其 `_kernel_id` 和 `_device`（支持的设备类型）。系统自动跳过与当前设备不匹配的算子。
+| Kernel ID | 文件 | 设备 | 替换内容 |
+|-----------|------|------|---------|
+| `npu_fused_swiglu` | `mlp/npu_swiglu.py` | NPU | 各种 LLM `*MLP` 的 SwiGLU forward（Qwen / Llama / GLM / Phi / Gemma / DeepSeek 等） |
+| `npu_fused_moe` | `mlp/npu_fused_moe.py` | NPU | MoE 融合（含 grouped GEMM） |
+| `npu_fused_rmsnorm` | `rms_norm/npu_rms_norm.py` | NPU | 各种 `*RMSNorm` forward |
+| `npu_fused_rope` | `rope/npu_rope.py` | NPU | 旋转位置编码 forward |
 
-## 替换机制
+具体支持的模块名见各 kernel 文件中的 `expect_modules`。
 
-融合算子通过替换模型中对应模块的 `forward` 方法接入模型，不修改模型权重，保持数值一致性。以下以 NPU RMSNorm 为例说明替换方式：
+## 替换原则
+
+替换只发生在 forward 上，不动权重：
 
 ```python
-# 原始 forward
-def forward(self, hidden_states):
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
-    hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-    return self.weight * hidden_states
+def npu_swiglu_forward(self, hidden_state):
+    return self.down_proj(
+        torch_npu.npu_swiglu(
+            torch.cat((self.gate_proj(hidden_state), self.up_proj(hidden_state)), dim=-1),
+            dim=-1,
+        )
+    )
 
-# 融合算子替换后（以 NPU 为例）
-def forward(self, hidden_states):
-    return torch_npu.npu_rms_norm(hidden_states, self.weight, epsilon=self.variance_epsilon)[0]
+# apply 内部
+module.forward = types.MethodType(npu_swiglu_forward, module)
 ```
 
-各硬件后端的具体差异和可用列表见 [多后端支持](../../../multi-backend/index.md)。
+因此：
 
-## 扩展新算子
+- 同一个模型在 NPU 和 GPU 上保存出来的权重格式一致
+- kernel 替换仅在当前进程内生效，关闭 `kernel_config` 即回退默认实现
 
-详见 [Kernel 插件 API](kernels_api.md)。
+## 添加新算子
+
+1. 在合适的子目录下新建 `<device>_<feature>.py`
+2. 写好 forward 函数
+3. 用 `@register_kernel` 装饰一个继承 `BaseKernel` 的类，设置 `_kernel_id` 和 `_device`
+4. 在 `apply` 里遍历 `model.named_modules()`，按类名替换 forward
+
+完整接口与最小例子见 [kernels_api](kernels_api.md)。

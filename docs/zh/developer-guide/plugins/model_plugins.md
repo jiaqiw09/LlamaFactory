@@ -1,153 +1,147 @@
 # 模型插件
 
-模型相关的 Plugin 集合，包括 PEFT（LoRA/Freeze）、量化、初始化和自定义 Kernel。
+模型相关的所有可替换部件：PEFT、量化、初始化设备、自定义算子、模板、序列并行。
 
-## PeftPlugin（LoRA / Freeze）
+代码位置：`src/llamafactory/v1/plugins/model_plugins/`。
 
-位于 `src/llamafactory/v1/plugins/model_plugins/peft.py`。
+## PeftPlugin
 
-### LoRA (`name: lora`)
-
-使用 HuggingFace PEFT 库的标准 LoRA 实现：
+`peft.py` 注册两个分支，分别对应 `peft_config.name=lora` 与 `freeze`。
 
 ```python
-@PeftPlugin("lora").register()
-def get_lora_model(model, config, is_train=False):
-    peft_config = LoraConfig(
-        task_type=CAUSAL_LM,
-        inference_mode=not is_train,
-        r=config.get("r", 8),
-        lora_alpha=config.get("lora_alpha", 16),
-        lora_dropout=config.get("lora_dropout", 0.05),
-        use_rslora=config.get("use_rslora", False),
-        use_dora=config.get("use_dora", False),
-        target_modules=target_modules,
-        modules_to_save=config.get("modules_to_save"),
-    )
-    model = get_peft_model(model, peft_config)
+class PeftPlugin(BasePlugin):
+    def __call__(self, model: HFModel, config: dict, is_train: bool) -> HFModel:
+        return super().__call__(model, config, is_train)
 ```
 
-`target_modules: "all"` 时自动发现所有 linear 层（排除 `lm_head`）。
+### `lora`
 
-### Adapter 加载与合并
+调用 HF PEFT 的 `LoraConfig` + `get_peft_model`。重要分支：
 
-- **加载已有 adapter**：通过 `adapter_name_or_path` 参数
-- **训练模式**：只加载单个 adapter 继续训练，使用 adapter 自身的超参数
-- **推理模式**：支持合并多个 adapter（逐一 `merge_and_unload`）
+- `target_modules == "all"`：扫描所有 `Linear` 模块，剔除 `lm_head` / `output_layer` / `output`
+- `target_modules` 为字符串：作为单个名字
+- `target_modules` 为列表：直接传给 `LoraConfig`
 
-### Freeze (`name: freeze`)
+`adapter_name_or_path` 处理：
 
-通过设置 `requires_grad` 实现部分参数冻结：
+- 训练模式只允许单个 adapter；继续训练该 adapter，**所有 LoRA 超参数被 adapter 自身的配置覆盖**
+- 推理模式可传多个 adapter，逐一 `merge_and_unload`
 
-```python
-@PeftPlugin("freeze").register()
-def get_freeze_model(model, config, is_train=False):
-    # freeze_trainable_layers: 正数=最后N层，负数=前N层
-    # freeze_trainable_modules: 要解冻的模块类型
-    # freeze_extra_modules: 额外解冻的非隐藏层模块
-```
+参数清单见 [PeftConfig](../../parameter-reference/peft_config.md)。
 
-自动识别模型的 `num_hidden_layers`（兼容不同模型架构的命名）。
+### `freeze`
 
-### 模型导出
+按层位/模块设 `requires_grad`：
 
-`merge_and_export_model()` 函数用于将 LoRA adapter 合并到基座模型：
+- `freeze_trainable_layers > 0`：放开"后 N 层"
+- `freeze_trainable_layers < 0`：放开"前 N 层"
+- `freeze_trainable_modules`：层内具体的子模块（如 `q_proj`）；`["all"]` 表示该层全部
+- `freeze_extra_modules`：非分层模块（如 embedding）
+- `cast_trainable_params_to_fp32`：可训练参数转 fp32 提稳定性
+
+层数从 `model.config` 的 `num_hidden_layers` / `num_layers` / `n_layer` 中取第一个非空值；若都没有，直接 `ValueError`。
+
+### 模型导出（merge）
+
+`peft.py:merge_and_export_model` 是 `lmf merge` 的入口：
 
 ```text
-加载基座模型 → merge_adapters → 转换 dtype → save_pretrained → [push_to_hub]
+ModelEngine(is_train=False) → merge adapters → 转 dtype → save_pretrained → push_to_hub (可选)
 ```
 
-## QuantizationPlugin（量化）
+- 仅支持 `name=lora`
+- 必填 `peft_config.export_dir`
+- `infer_dtype="auto"` 在 fp32 + 支持 bf16 时转 bf16
+- `export_legacy_format=true` 输出 `.bin` 而非 safetensors
 
-位于 `src/llamafactory/v1/plugins/model_plugins/quantization.py`。
+详见 [model_export](../../feature-guide/model_export.md)。
 
-### Auto (`name: auto`)
+## QuantizationPlugin
 
-自动选择量化方法，当前仅支持 BNB。
+`quantization.py` 注册 `auto` 与 `bnb`：
 
-### BNB (`name: bnb`)
+- `auto`：根据 `quantization_bit` 选择具体后端，目前一律分派到 `bnb`
+- `bnb`：bitsandbytes 4-bit / 8-bit
 
-BitsAndBytes 4-bit / 8-bit 量化：
+构造 `BitsAndBytesConfig` 时读取的字段：
+
+| 字段 | 4-bit | 8-bit |
+|------|-------|-------|
+| `quantization_bit` | `4` | `8` |
+| `compute_dtype` | `bnb_4bit_compute_dtype` | — |
+| `double_quantization` | `bnb_4bit_use_double_quant` | — |
+| `quantization_type` | `bnb_4bit_quant_type` | — |
+
+> **注**：训练模式只允许 4-bit（用于 FSDP + QLoRA），8-bit 仅推理可用。该限制在 `quantization_with_bnb` 内部直接 `ValueError`。
+
+参数细节见 [QuantConfig](../../parameter-reference/quant_config.md)。
+
+## InitPlugin
+
+`initialization.py` 注册三种初始化策略：
 
 ```python
-@QuantizationPlugin("bnb").register()
-def quantization_with_bnb(init_kwargs, model_args, **kwargs):
-    if quantization_bit == 8:
-        init_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-    elif quantization_bit == 4:
-        init_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=...,
-            bnb_4bit_use_double_quant=...,
-            bnb_4bit_quant_type=...,
-        )
+@InitPlugin("init_on_default").register()
+def init_on_default() -> torch.device:
+    return DistributedInterface().current_device
+
+@InitPlugin("init_on_meta").register()
+def init_on_meta() -> torch.device:
+    return torch.device(DeviceType.META.value)
+
+@InitPlugin("init_on_rank0").register()
+def init_on_rank0() -> torch.device:
+    if DistributedInterface().get_rank() == 0:
+        return torch.device(DeviceType.CPU.value)
+    return torch.device(DeviceType.META.value)
 ```
 
-训练模式下仅支持 4-bit（用于 FSDP+QLoRA）。
+`InitPlugin(name)()` 返回的 `torch.device` 被 `ModelEngine._init_model` 用作 `device_map`。`init_on_meta` 与 `init_on_rank0` 都依赖 FSDP2 后续在 `shard_model` 阶段填充权重，仅在 FSDP2 路径下有效。
 
-### 量化参数
+## RenderingPlugin
 
-| 参数 | 说明 |
-|------|------|
-| `quantization_bit` | `4` 或 `8` |
-| `compute_dtype` | 计算用 dtype |
-| `double_quantization` | 是否双重量化 |
-| `quantization_type` | `nf4` 等量化类型 |
+`rendering.py` 提供懒导入的模板注册表，机制见 [renderer](../core/renderer.md#renderingplugin)。仓库内置 `qwen3` / `qwen3_nothink`，加上 `Renderer` 内置的 `chatml`。
 
-## InitPlugin（模型初始化）
+新增模板时只要把文件放进 `templates/`，第一次按名字调用即自动 import。
 
-位于 `src/llamafactory/v1/plugins/model_plugins/initialization.py`。
+## KernelPlugin
 
-| 模式 | 说明 |
-|------|------|
-| `init_on_default` | 每张卡分别加载（默认） |
-| `init_on_meta` | 在 meta device 上初始化（省内存，由 FSDP2 后续实际加载权重） |
-| `init_on_rank0` | Rank 0 加载到 CPU，再由 FSDP2 分发给其他 rank |
-
-## KernelPlugin（自定义算子）
-
-启用硬件优化的融合算子，详见 [Custom Kernels 开发者文档](custom-kernels/overview.md)。
-
-## RenderingPlugin（模板渲染）
-
-通过 `RenderingPlugin(template_name)` 渲染对话为 token 序列。Template 文件位于 `plugins/model_plugins/templates/`，使用延迟导入。
-
-### 已实现的 Template
-
-| Template | 文件 | 特性 |
-|----------|------|------|
-| `qwen3` | `templates/qwen3.py` | 支持 reasoning、tool_call |
-| `qwen3_nothink` | `templates/qwen3_nothink.py` | Qwen3 无思考模式 |
-| `chatml` | 内建于 `rendering.py` | 通用 ChatML 格式 |
-
-### Template 开发
-
-注册新 template 需实现两个方法：
+`kernels/interface.py` 注册唯一的 `auto` 分支，根据 `include_kernels` 启用已注册的 kernel：
 
 ```python
-@RenderingPlugin("my_template").register("render_messages")
-def render_my_template(processor, messages, tools, is_generate, enable_thinking):
-    ...
-    return ModelInput(input_ids=..., attention_mask=..., labels=..., loss_weights=...)
-
-@RenderingPlugin("my_template").register("parse_message")
-def parse_my_template(generated_text):
-    ...
-    return Message(role="assistant", content=[...])
+@KernelPlugin("auto").register()
+def apply_default_kernels(model, include_kernels=None):
+    if not include_kernels:
+        return model
+    if include_kernels == "auto" or include_kernels is True:
+        use_kernels = default_kernels.keys()
+    else:
+        use_kernels = include_kernels.split(",")
+    for k in use_kernels:
+        apply_kernel(k, model=model)
+    return model
 ```
 
-## Sequence Parallel Plugins
+`default_kernels` 在 `scan_all_kernels()` 里通过遍历 `kernels/ops/` 目录得到。kernel 注册机制见 [custom-kernels](custom-kernels/overview.md)。
 
-位于 `src/llamafactory/v1/plugins/model_plugins/parallelization/`。
+## SequenceParallel*Plugin
 
-### SequenceParallelModelPlugin
+`parallelization/sequence_parallel.py` 注册两个插件：
 
-Ulysses 序列并行：替换 `_flash_attention_forward` 为并行版本。
+| Plugin | 注册 name | 用途 |
+|--------|-----------|------|
+| `SequenceParallelModelPlugin` | `ulysses` | 替换 transformers 的 `_flash_attention_forward` 为 Ulysses attention |
+| `SequenceParallelLossPlugin` | `sequence_parallel_loss` | 在 cp 维度切分序列后计算 loss，再用 all_gather 拼回完整 logits |
 
-### SequenceParallelLossPlugin
+`BaseTrainer.__init__` 在 `cp_size > 1` 时调用 `SequenceParallelModelPlugin(cp_mode)(model, dist_config)`，这是一个 monkey-patch：把 `transformers.modeling_flash_attention_utils._flash_attention_forward` 全局替换。
 
-序列并行 loss 计算：在 attention 维度拆分输入，通过 all_gather 收集完整 log_probs 后计算 loss。
+`fit()` 的 forward 路径在 `cp_size > 1` 时调 `SequenceParallelLossPlugin("sequence_parallel_loss")` 代替 `compute_loss`。
 
-### 序列并行通信
+要求：
 
-位于 `ulysses.py` 和 `seq_comm.py`，实现 Ulysses attention 的 all-to-all 通信。
+- `num_attention_heads % cp_size == 0`
+- `num_key_value_heads % cp_size == 0` 或 `cp_size % num_key_value_heads == 0`
+- 默认 attention 实现会被强制设为 `flash_attention_2`
+- qwen3.5 因 attention 实现差异不支持，`BaseTrainer` 会直接 `RuntimeError`
+
+底层 all-to-all 通信封装在 `parallelization/ulysses.py` 与 `seq_comm.py`。

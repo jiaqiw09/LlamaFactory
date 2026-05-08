@@ -1,38 +1,14 @@
-# Kernel 插件 API
+# Kernel API
 
-## 概览
+写一个新 kernel 涉及三件事：继承 `BaseKernel`、定义 `_kernel_id` 与 `_device`、用 `@register_kernel` 装饰类。本页给出完整接口和最小可工作例子。
 
-Kernel 插件系统通过注册表机制管理所有 kernel。`@register_kernel` 装饰器负责在定义后自动注册，`apply_kernel` 用于启用指定 kernel，`apply_default_kernels` 用于启用当前环境所有可用的默认 kernel。
+代码位置：
 
-## 架构设计
+- `kernels/base.py`：`BaseKernel`
+- `kernels/registry.py`：`Registry` + `register_kernel`
+- `kernels/interface.py`：`scan_all_kernels` / `apply_kernel` / `apply_default_kernels` / `KernelPlugin`
 
-### Registry（注册表）
-
-`Registry` 是管理所有 kernel 实现的静态类，维护字典结构 `{kernel_id: KernelClass}`。
-
-```python
-class Registry:
-    @classmethod
-    def register(cls, kernel_cls: type[BaseKernel]) -> type[BaseKernel] | None:
-        """注册一个 kernel 类"""
-
-    @classmethod
-    def get(cls, kernel_id: str) -> type[BaseKernel] | None:
-        """根据 ID 获取 kernel 类"""
-```
-
-### register_kernel（装饰器）
-
-`@register_kernel` 是 `Registry.register` 的别名。注册机制：
-
-1. 检查类是否继承自 `BaseKernel`
-2. 检查类是否定义了 `_kernel_id` 和 `_device` 属性
-3. 检查 `_device` 是否与当前运行环境的加速器类型匹配，不匹配则跳过注册
-4. 符合要求则注册到全局注册表
-
-### BaseKernel（基类）
-
-所有 kernel 必须继承自 `BaseKernel` 抽象基类：
+## BaseKernel
 
 ```python
 class BaseKernel(ABC):
@@ -40,74 +16,113 @@ class BaseKernel(ABC):
     _device: DeviceType = DeviceType.CPU
 
     @classmethod
+    def get_kernel_id(cls) -> str: ...
+
+    @classmethod
+    def get_device(cls) -> str: ...
+
+    @classmethod
     def check_deps(cls) -> bool:
-        """检查依赖项"""
+        # 默认实现：当前 accelerator 类型必须等于 _device
+        ...
 
     @classmethod
     @abstractmethod
-    def apply(cls, **kwargs) -> HFModel:
-        """应用 kernel 到模型"""
+    def apply(cls, **kwargs) -> HFModel: ...
 ```
 
-### 标识系统
+子类至少要：
 
-- **Kernel ID**（`_kernel_id`）：唯一字符串标识符，如 `"npu_fused_rmsnorm"`
-- **Device Type**（`_device`）：支持的设备类型，如 `DeviceType.CUDA`、`DeviceType.NPU`
+- 设置 `_kernel_id`：进程内唯一字符串
+- 设置 `_device`：`DeviceType.CUDA` / `DeviceType.NPU` 等
+- 实现 `apply(cls, **kwargs)`：从 `kwargs` 里取 `model`，遍历替换 forward，返回 `model`
 
-## API
+`check_deps()` 可以重写，加更细的依赖判断（如检测 `torch_npu` 版本）；默认只看设备类型。
 
-### scan_all_kernels
-
-自动扫描 `ops` 目录下的所有 `.py` 文件并导入，触发 `@register_kernel` 完成自动注册。
-
-### apply_kernel
+## Registry
 
 ```python
-def apply_kernel(kernel_id: str, **kwargs) -> HFModel:
-    """应用指定的 kernel 到模型"""
+class Registry:
+    _kernels: dict[str, type[BaseKernel]] = {}
+
+    @classmethod
+    def register(cls, kernel_cls: type[BaseKernel]) -> type[BaseKernel] | None:
+        if not issubclass(kernel_cls, BaseKernel): raise TypeError
+        kernel_id = kernel_cls.get_kernel_id()
+        if kernel_cls.get_device() != get_current_accelerator().type:
+            return                                  # 设备不匹配，跳过
+        if not kernel_id: raise ValueError
+        if kernel_id in cls._kernels: raise ValueError("already registered")
+        cls._kernels[kernel_id] = kernel_cls
+        return kernel_cls
 ```
 
-### apply_default_kernels
+注意：
+
+- 注册同一个 `_kernel_id` 两次会直接 `ValueError`
+- 设备不匹配时静默 return（不报错），所以同一个文件可以同时为 CUDA 和 NPU 写实现，跑哪个取决于当前设备
+
+`register_kernel = Registry.register`，作为装饰器使用。
+
+## 入口函数
 
 ```python
-def apply_default_kernels(model: HFModel, include_kernels: str = None) -> HFModel:
-    """应用所有默认 kernel"""
+def scan_all_kernels(): ...                    # 遍历 ops/ 下所有 .py 触发注册
+def get_default_kernels() -> list[str]: ...    # 返回当前注册的 kernel id 列表
+def apply_kernel(kernel_id: str, **kwargs): ...
 ```
 
-## 扩展 Kernel
+`apply_kernel` 找不到对应 id 时直接 `ValueError`。
 
-### 创建新 Kernel
+## 最小例子
 
-在 `src/llamafactory/v1/plugins/model_plugins/kernels/ops` 下的相应子目录中创建实现文件：
+文件路径：`kernels/ops/<category>/<your_kernel>.py`。`scan_all_kernels` 会自动 import `ops/` 下所有文件，无需在任何注册表里手写注册。
 
 ```python
+import types
 from ......accelerator.helper import DeviceType
 from ......utils.types import HFModel
 from ...base import BaseKernel
 from ...registry import register_kernel
 
+
+def cuda_my_norm_forward(self, hidden_states):
+    # 高性能实现
+    ...
+
+
 @register_kernel
-class CudaSwiGluKernel(BaseKernel):
-    _kernel_id = "cuda_fused_swiglu"
+class CudaMyNormKernel(BaseKernel):
+    _kernel_id = "cuda_my_norm"
     _device = DeviceType.CUDA
+
+    expect_modules = frozenset({"LlamaRMSNorm", "Qwen3RMSNorm"})
 
     @classmethod
     def apply(cls, **kwargs) -> HFModel:
         model = kwargs.get("model")
         if model is None:
-            raise ValueError("model is required")
+            raise ValueError(f"model is required for {cls.__name__}")
         if not cls.check_deps():
-            raise RuntimeError("Dependencies not met")
-        for name, module in model.named_modules():
-            pass
+            raise RuntimeError(f"{cls.__name__} dependency check failed")
+
+        for _, module in model.named_modules():
+            if module.__class__.__name__ in cls.expect_modules:
+                module.forward = types.MethodType(cuda_my_norm_forward, module)
         return model
 ```
 
-### 自动发现
+写完之后：
 
-`scan_all_kernels` 会自动扫描 `ops` 目录，文件位于该目录下即可自动注册，无需手动修改注册表代码。
+- `import` 该文件即触发注册（`scan_all_kernels` 启动时自动完成）
+- YAML 里 `include_kernels: cuda_my_norm` 即可启用
+- API 调用：`apply_kernel("cuda_my_norm", model=model)`
 
-## 异常处理
+## 出错点速查
 
-- **依赖不可用**：`check_deps()` 返回 `False` 时，`apply()` 应抛出异常
-- **Kernel ID 未找到**：调用 `apply_kernel` 时传入不存在的 `kernel_id` 会抛出 `ValueError`
+| 现象 | 原因 |
+|------|------|
+| `check_deps` 通过但替换没生效 | 类名匹配条件没命中；检查 `expect_modules` 与 `model.named_modules()` 实际类名 |
+| 启动时 `Failed to import ...` 警告 | `kernels/ops/<file>.py` import 阶段报错；通常是依赖缺失（如 `torch_npu` 在非 NPU 环境） |
+| `Kernel xxx not found` | 当前设备类型不匹配；或 `_kernel_id` 拼写不一致 |
+| 注册同名报错 | `_kernel_id` 已被另一个类占用，改名或合并 |

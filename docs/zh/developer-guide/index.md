@@ -1,23 +1,33 @@
 # 开发者指南
 
-设计原理与扩展模式，面向需要理解内部机制或扩展框架的开发者。
+面向需要理解 v1 内部机制或扩展框架的开发者。文档按"先骨架，再核心模块，再插件"组织：先掌握插件机制，剩下的页面都是它的具体应用。
+
+## 骨架
 
 | 页面 | 说明 |
 |------|------|
-| [架构概览](architecture_overview.md) | 分层插件化架构总览、核心设计、关键路径、扩展点 |
-| [BasePlugin 机制](baseplugin_mechanism.md) | 命名注册表、装饰器注册、参数分发、延迟导入 |
-| **核心模块** | |
-| [DataEngine](core/data_engine.md) | 数据集加载、索引构建、格式转换的协调入口 |
-| [ModelEngine](core/model_engine.md) | 模型加载管线：Processor → Config → Model → Plugin |
-| [BaseTrainer](core/base_trainer.md) | 训练循环基类：batch 生成、分布式集成、Checkpoint、Callback |
-| [Accelerator 层](core/accelerator.md) | 硬件抽象、DeviceMesh 并行拓扑、分布式通信原语 |
-| [Renderer 与 Template 系统](core/renderer.md) | Messages → ModelInput 的渲染管线、可插拔模板注册 |
-| [BatchGenerator](core/batch_generator.md) | 批次生成、梯度累积、StatefulDataLoader、断点续训 |
-| [Callback 系统](core/callback.md) | 训练钩子机制、LoggingCallback、自定义 Callback |
-| **插件模块** | |
-| [数据插件](plugins/data_plugins.md) | DataConverterPlugin、DataLoaderPlugin、索引调整函数 |
-| [模型插件](plugins/model_plugins.md) | PeftPlugin、QuantizationPlugin、InitPlugin、RenderingPlugin、SequenceParallel |
-| [训练器插件](plugins/trainer_plugins.md) | DistributedPlugin、BatchingPlugin、OptimizerPlugin、LRSchedulerPlugin |
-| [Kernel 插件系统](plugins/custom-kernels/overview.md) | Kernel 注册机制、使用方式、融合算子总览 |
-| [Kernel 插件 API](plugins/custom-kernels/kernels_api.md) | BaseKernel、Registry、扩展新 Kernel 的完整步骤 |
-| [融合算子](plugins/custom-kernels/fused_operators.md) | 算子分类、替换机制、实现入口 |
+| [架构概览](architecture_overview.md) | 目录布局、训练入口路径、并行拓扑、扩展点速查 |
+| [BasePlugin](baseplugin_mechanism.md) | 命名注册表、多方法注册、`name` 路由、懒导入 |
+
+## Core 模块
+
+| 页面 | 对应源码 |
+|------|---------|
+| [DataEngine](core/data_engine.md) | `core/data_engine.py` |
+| [ModelEngine](core/model_engine.md) | `core/model_engine.py` |
+| [BaseTrainer](core/base_trainer.md) | `core/base_trainer.py` |
+| [BatchGenerator](core/batch_generator.md) | `core/utils/batching.py` |
+| [Renderer](core/renderer.md) | `core/utils/rendering.py` + `plugins/model_plugins/rendering.py` |
+| [Callback](core/callback.md) | `utils/callbacks/` |
+| [Accelerator](core/accelerator.md) | `accelerator/` |
+
+## 插件
+
+| 页面 | 内容 |
+|------|------|
+| [data_plugins](plugins/data_plugins.md) | `DataLoaderPlugin` / `DataConverterPlugin` |
+| [model_plugins](plugins/model_plugins.md) | PEFT / Quant / Init / Rendering / Kernel / Sequence Parallel |
+| [trainer_plugins](plugins/trainer_plugins.md) | Distributed (FSDP2/DeepSpeed) / Batching / Optimizer / LRScheduler |
+| [custom-kernels/overview](plugins/custom-kernels/overview.md) | Kernel 系统总览与启用方式 |
+| [custom-kernels/kernels_api](plugins/custom-kernels/kernels_api.md) | `BaseKernel` / `Registry` / `apply_kernel` 接口与扩展步骤 |
+| [custom-kernels/fused_operators](plugins/custom-kernels/fused_operators.md) | 当前内置算子分类与替换内容 |

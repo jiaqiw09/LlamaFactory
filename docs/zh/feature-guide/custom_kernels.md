@@ -1,31 +1,50 @@
 # 自定义算子
 
-v1 支持通过 `kernel_config` 为不同硬件后端加载优化的融合算子。
+`kernel_config` 控制是否启用注册到 `KernelPlugin` 的算子替换。哪些算子可用取决于当前硬件后端 —— 启动时只有与当前设备匹配的 kernel 才会被注册。
 
-## 配置
+参数细节见 [KernelConfig](../parameter-reference/kernel_config.md)，扩展接口见 [Kernel API](../developer-guide/plugins/custom-kernels/kernels_api.md)。
+
+## 启用方式
 
 ```yaml
 kernel_config:
   name: auto
-  include_kernels: auto
+  include_kernels: auto       # 全部启用
 ```
 
-- `include_kernels: auto` — 自动启用当前硬件所有可用 kernel
-- `include_kernels: "kernel_id1,kernel_id2"` — 手动指定
-- `include_kernels: null` — 不启用
+`include_kernels` 取值：
 
-`auto` 模式下，kernel 会在启动时自动发现和注册；只有与当前硬件匹配的 kernel 会被启用。显式指定不兼容的 kernel 会报错。
+| 值 | 行为 |
+|----|------|
+| `null` / `false` / 空串 | 不启用任何 kernel |
+| `auto` 或 `true` | 启用所有当前可用的默认 kernel |
+| `"id1,id2"` | 仅启用列表内 kernel id |
+
+显式指定不存在或当前设备不可用的 id 会直接 `ValueError`。
 
 ## GPU
 
-GPU 使用 Flash Attention 2 等标准算子，通过安装 `flash-attn` 启用：
+GPU 默认依赖 Flash Attention 2，由 `flash-attn` 包提供：
 
 ```bash
 pip install flash-attn
 ```
 
-无需额外配置，模型加载时会自动检测并启用。
+模型加载时 `transformers` 会自动检测使用，无需 `kernel_config`。`kernel_config: auto` 此时通常不会启用任何额外算子，除非有为 CUDA 注册的 kernel。
 
-## 其他硬件后端
+## 其它硬件后端
 
-各硬件后端提供的专属融合算子见 [多后端支持](../multi-backend/index.md)。开发者文档见 [Kernel 插件 API](../developer-guide/plugins/custom-kernels/kernels_api.md)。
+NPU / XPU / 其它后端的可用 kernel 列表与依赖见 [多后端支持](../multi-backend/index.md)。其中 NPU 当前已注册的 kernel 包括：
+
+- `npu_fused_swiglu`
+- `npu_fused_moe`
+- `npu_fused_rmsnorm`
+- `npu_fused_rope`
+
+支持范围与触发条件见 [fused_operators](../developer-guide/plugins/custom-kernels/fused_operators.md)。
+
+## 注意
+
+- Kernel 只替换 forward，不动权重 → 保存出去的模型与未启用 kernel 时一致
+- 同一进程多次调用没有副作用：`apply_default_kernels` 会跳过已经注册过的 kernel
+- 关闭 `kernel_config` 即可回退默认实现，方便排查算子相关问题

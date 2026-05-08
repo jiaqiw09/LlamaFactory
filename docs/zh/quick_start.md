@@ -1,17 +1,19 @@
 # 快速开始
 
-## 训练方法
+最短可运行链路：装好依赖 → 准备数据 → 跑一条命令。
 
-| 方法 | 全参数训练 | 部分参数训练 | LoRA | QLoRA |
-|:---:|:---:|:---:|:---:|:---:|
-| 指令监督微调 | 支持 | 支持 | 支持 | 支持 |
-| 奖励模型训练 | 未实现 | 未实现 | 未实现 | 未实现 |
-| DPO 训练 | 未实现 | 未实现 | 未实现 | 未实现 |
+## 训练方法支持矩阵
+
+| 方法 | 全参 | Freeze | LoRA | QLoRA |
+|------|:----:|:------:|:----:|:-----:|
+| 监督微调（SFT） | 支持 | 支持 | 支持 | 支持 |
+| 奖励建模（RM） | 未实现 | 未实现 | 未实现 | 未实现 |
+| 偏好对齐（DPO） | 未实现 | 未实现 | 未实现 | 未实现 |
 
 ## 软件依赖
 
-| 必需项 | 至少 | 推荐 |
-|:---:|---|---|
+| 必需 | 至少 | 推荐 |
+|------|------|------|
 | python | 3.11 | 3.12 |
 | torch | 2.7.1 | 2.7.1 |
 | torchvision | 0.22.1 | 0.22.1 |
@@ -19,18 +21,15 @@
 | datasets | 3.2.0 | 4.0.0 |
 | peft | 0.18.1 | 0.18.1 |
 
-| 可选项 | 至少 | 推荐 |
-|:---:|---|---|
+| 可选 | 至少 | 推荐 |
+|------|------|------|
 | CUDA（NVIDIA GPU） | 11.6 | 12.2 |
 | deepspeed | 0.18.4 | 0.18.4 |
 | flash-attn（NVIDIA GPU） | 2.5.6 | 2.7.2 |
 
-> 其他硬件后端依赖见 [多后端支持](multi-backend/index.md)。
+其它硬件后端依赖见 [多后端支持](multi-backend/index.md)。
 
 ## 安装
-
-> [!IMPORTANT]
-> 此步骤为必需。
 
 ```bash
 git clone --depth 1 https://github.com/hiyouga/LlamaFactory.git
@@ -38,23 +37,36 @@ cd LlamaFactory
 pip install -e .
 ```
 
-## 数据准备
+## 数据
 
-关于数据集文件的格式，请参考 [数据准备](feature-guide/data_preparation.md)。你可以使用 HuggingFace / ModelScope 上的数据集或加载本地数据集。
+数据集格式与配置文件写法见 [数据准备](feature-guide/data_preparation.md)；本仓库 `data/v1_sft_demo.yaml` 是一份开箱即跑的最小配置，下面的命令可以直接用它。
 
-> [!NOTE]
-> 使用自定义数据集或自定义数据集格式时，请参照 [数据准备](feature-guide/data_preparation.md) 进行配置，如有必要，请重新实现自定义数据集的数据处理逻辑，包括对应的 `converter`。
+## 第一次运行
 
-您也可以使用 **[Easy Dataset](https://github.com/ConardLi/easy-dataset)**、**[DataFlow](https://github.com/OpenDCAI/DataFlow)** 和 **[GraphGen](https://github.com/open-sciencelab/GraphGen)** 构建用于微调的合成数据。
-
-## 快速开始
-
-下面的命令展示了对 Qwen3-0.6B 模型使用 FSDP2 进行全参微调，两行命令等价。
+启用 v1 入口：
 
 ```bash
 export USE_V1=1
+```
+
+跑一次 Qwen3-0.6B 全参 SFT（FSDP2 后端）：
+
+```bash
 llamafactory-cli sft examples/v1/train_full/train_full_fsdp2.yaml
+```
+
+`sft` 与 `train` 等价：
+
+```bash
 llamafactory-cli train examples/v1/train_full/train_full_fsdp2.yaml
 ```
 
-高级用法请参考 [开发指南](developer-guide/architecture_overview.md)（包括多卡多机微调、分布式、LoRA、量化、以及各种加速特性等）。
+多 GPU 自动通过 `torchrun` 启动；要想单卡也强制走分布式路径，设 `FORCE_TORCHRUN=1`。
+
+## 下一步
+
+- 数据格式与多数据集混合 → [数据准备](feature-guide/data_preparation.md)
+- 全参 / LoRA / Freeze 三种 SFT 模式 → [SFT](feature-guide/sft.md)
+- FSDP2 / DeepSpeed / Context Parallel → [分布式训练](feature-guide/distributed_training.md)
+- 推理与对话 → [推理与部署](feature-guide/inference.md)
+- 框架原理与扩展点 → [开发者指南](developer-guide/architecture_overview.md)

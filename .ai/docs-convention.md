@@ -112,12 +112,11 @@ Prefer relative links to nearby docs. Avoid empty links.
 - Use semantic titles, not numbered titles
   - Good: `## DataConverterPlugin`
   - Good: `### Alpaca Converter`
-  - Bad: `## 1. DataConverterPlugin 简介`
-  - Bad: `### 2.1 Alpaca 格式`
+  - Bad: `## 1. DataConverterPlugin Overview`
+  - Bad: `### 2.1 Alpaca Format`
 - Use one `#` page title per file
 - Use `##` for major sections and `###` for subsections
 - Use `####` only when a page genuinely needs deep nesting
-- Titles should follow the document language
 - Parameter Reference page titles should use class/config names, such as `# DataArguments` or `# PeftConfig`
 
 ### Tables
@@ -128,9 +127,9 @@ Prefer relative links to nearby docs. Avoid empty links.
 - Put long explanation in prose before or after the table, not inside table cells
 
 ```markdown
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `name` | `str` | `auto` | 插件名 |
+| name | type | default | description |
+|------|------|---------|-------------|
+| `name` | `str` | `auto` | Plugin name |
 ```
 
 ### Code Blocks
@@ -151,17 +150,13 @@ Always specify a language tag:
 
 ### Notes
 
-Use blockquotes for short notes and warnings:
-
-```markdown
-> **注意**：此参数仅在 FSDP2 模式下生效。
-```
+Use blockquotes for short notes and warnings. Bold the leading marker (e.g. `Note`, `Warning`) followed by a colon, then the message.
 
 Use `<details>` only for optional long content that would interrupt the main flow:
 
 ```html
 <details>
-<summary>方式 2：使用 HF Hub 上的 YAML 配置文件</summary>
+<summary>Alternative: load YAML from HF Hub</summary>
 
 Content.
 

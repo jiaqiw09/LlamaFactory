@@ -1,14 +1,26 @@
 # 功能指南
 
-面向用户任务的端到端使用指南，以 GPU 为基线。所有配置示例使用 YAML 格式。
+面向用户任务的端到端使用指南，以 GPU 为基线后端。所有示例使用 YAML 配置，参数细节链接到 [参数参考](../parameter-reference/index.md)。
+
+## 数据 → 训练
 
 | 页面 | 说明 |
 |------|------|
-| [数据准备](data_preparation.md) | 标准数据格式、数据集配置文件、混合多数据集 |
-| [监督微调（SFT）](sft.md) | 全参数微调、LoRA、Freeze 三种模式的配置与使用 |
-| [偏好对齐（DPO）](dpo.md) | 当前实现状态、数据格式和后续接入位置 |
-| [推理与部署](inference.md) | CLI 对话模式、推理配置、LoRA 模型使用 |
-| [模型导出](model_export.md) | LoRA 合并导出、Hub 推送 |
-| [模型保存与恢复](model_saving.md) | 最终模型保存、checkpoint、断点恢复、DCP/DeepSpeed 保存格式 |
-| [分布式训练](distributed_training.md) | FSDP2、DeepSpeed、Context Parallel、DDP |
-| [自定义算子](custom_kernels.md) | Kernel 配置、GPU 算子、硬件后端扩展 |
+| [数据准备](data_preparation.md) | 标准 Messages 格式、四种入参形态、多数据集混合、自定义 converter |
+| [SFT](sft.md) | 全参 / LoRA / Freeze 三种模式 |
+| [DPO](dpo.md) | 当前实现状态与数据格式 |
+
+## 训练后
+
+| 页面 | 说明 |
+|------|------|
+| [模型保存与恢复](model_saving.md) | 最终模型保存、checkpoint、断点续训、保留策略 |
+| [模型导出](model_export.md) | LoRA 合并并导出为可部署的 HF 目录 |
+| [推理与部署](inference.md) | CLI 对话、批量推理、LoRA 直接加载 |
+
+## 性能与硬件
+
+| 页面 | 说明 |
+|------|------|
+| [分布式训练](distributed_training.md) | FSDP2、DeepSpeed、Context Parallel、DDP 自动回退 |
+| [自定义算子](custom_kernels.md) | `kernel_config` 启用方式、与硬件后端的关系 |

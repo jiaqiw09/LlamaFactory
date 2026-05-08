@@ -1,66 +1,23 @@
 # 数据准备
 
-## 总览
+v1 把所有数据统一成 **Messages 格式**：每个样本是一份消息列表，role 字段标识角色，`loss_weight` 决定哪些 token 参与训练。
 
-v1 采用统一的 **Messages 格式**作为标准数据格式，所有数据最终都会被转换为标准的对话消息列表。通过内置的 `DataConverterPlugin`，Alpaca、ShareGPT、Pair 等格式可自动转换；自定义格式可通过注册新的 Converter 实现。
+实际加载流程由 `DataEngine` 根据 `train_dataset` 字段的取值形态分派；参数细节见 [DataArguments](../parameter-reference/data_arguments.md) 与 [DatasetInfo](../parameter-reference/dataset_info.md)。
 
-与 v0 相比，v1 通过 `DataEngine` + Plugin 机制提供了统一的数据处理流程，具有更好的可扩展性和一致性。
+## `train_dataset` 的四种取值
 
-## 基本用法
+| 形态 | 含义 | 例子 |
+|------|------|------|
+| 本地 YAML 文件 | 多数据集配置，最常用 | `data/v1_sft_demo.yaml` |
+| HF Hub 上的 YAML | YAML 在 dataset repo 里 | `llamafactory/v1-sft-demo/dataset_info.yaml` |
+| 本地数据文件或目录 | 数据本身已经是标准 Messages 格式 | `~/data/v1_sft_demo.jsonl` |
+| HF Hub 数据集 ID | 默认从 Hub 拉数据 | `llamafactory/v1-sft-demo` |
 
-### 在训练配置文件中配置数据集
+YAML 里的字段定义见 [DatasetInfo](../parameter-reference/dataset_info.md)。直接给数据文件 / Hub ID 时，框架会自动包装成 `{"default": {"path": ..., "source": ...}}`，但要求文件本身已经是标准 Messages 格式。
 
-<details open>
-<summary>方式 1：使用 HF Hub Repo ID</summary>
+## 标准 Messages 格式
 
-直接指定 HF Hub 上的数据集 Repo ID，`DataEngine` 会自动从 Hub 下载并加载。
-
-```yaml
-train_dataset: llamafactory/v1-sft-demo
-```
-
-</details>
-
-<details>
-<summary>方式 2：使用 HF Hub 上的 YAML 配置文件</summary>
-
-`train_dataset` 字段指定 HF Hub 上的 `dataset_info.yaml` 路径，`DataEngine` 会自动下载该配置文件并根据其中的配置加载数据集。
-
-```yaml
-train_dataset: llamafactory/v1-sft-demo/dataset_info.yaml
-```
-
-</details>
-
-<details>
-<summary>方式 3：使用本地数据集文件路径</summary>
-
-`train_dataset` 字段指定本地的数据集文件路径（`.json`、`.jsonl` 等）。直接指定数据集文件路径时，要求该数据文件为标准 Messages 格式。
-
-```yaml
-train_dataset: ~/data/v1_sft_demo.jsonl
-```
-
-</details>
-
-<details>
-<summary>方式 4：使用本地 YAML 配置文件路径</summary>
-
-`train_dataset` 字段指定本地的 `dataset_info.yaml` 配置文件路径，`DataEngine` 会根据该配置加载数据集。
-
-```yaml
-train_dataset: ~/data/dataset_info.yaml
-```
-
-</details>
-
-## 标准数据格式
-
-v1 使用统一的 **Messages 格式**作为标准数据格式。每个样本都是一个包含 `messages` 字段的 JSON 对象。
-
-针对 Alpaca、ShareGPT、Pair 等格式的数据，可以通过内置的 Converter 自动转换。对于其他自定义格式的数据，可通过注册自定义 Converter 来实现格式标准化，详见 [DataConverterPlugin](../developer-guide/plugins/data_plugins.md)。
-
-### SFT（监督微调）样本格式
+### SFT 样本
 
 ```json
 {
@@ -84,51 +41,34 @@ v1 使用统一的 **Messages 格式**作为标准数据格式。每个样本都
 }
 ```
 
-字段说明：
+字段：
 
-- **messages**: 消息列表，包含一轮或多轮对话
-  - **role**: 消息角色，可选值：`"system"`、`"user"`、`"assistant"`、`"tool"`
-  - **content**: 内容列表，每个元素包含：
-    - **type**: 内容类型，可选值：`"text"`、`"image_url"`、`"audio_url"`、`"video_url"`、`"tools"`、`"tool_call"`、`"reasoning"`
-    - **value**: 具体内容（字符串）
-  - **loss_weight**: 损失权重（浮点数），`0.0` 不计算损失，`1.0` 完全计算损失
-- **_dataset_name** (可选): 数据集名称，由 DataEngine 自动添加
-- **extra_info** (可选): 额外信息字段
+- `role`：`system` / `user` / `assistant` / `tool`
+- `content`：`{"type": ..., "value": ...}` 列表，`type` 取 `text` / `image_url` / `audio_url` / `video_url` / `tools` / `tool_call` / `reasoning`
+- `loss_weight`：`0.0` 不计算损失，`1.0` 完全计算
+- `_dataset_name`（可选）：由 `DataEngine` 自动注入
+- `extra_info`（可选）：原样透传到 `ModelInput`，便于训练循环按数据集打标
 
-### DPO（偏好对齐）样本格式
+### DPO 偏好对样本
 
 ```json
 {
   "chosen_messages": [
-    {
-      "role": "user",
-      "content": [{"type": "text", "value": "用户提问"}],
-      "loss_weight": 0.0
-    },
-    {
-      "role": "assistant",
-      "content": [{"type": "text", "value": "更优的回答"}],
-      "loss_weight": 1.0
-    }
+    {"role": "user", "content": [{"type": "text", "value": "提问"}], "loss_weight": 0.0},
+    {"role": "assistant", "content": [{"type": "text", "value": "更优回答"}], "loss_weight": 1.0}
   ],
   "rejected_messages": [
-    {
-      "role": "user",
-      "content": [{"type": "text", "value": "用户提问"}],
-      "loss_weight": 0.0
-    },
-    {
-      "role": "assistant",
-      "content": [{"type": "text", "value": "较差的回答"}],
-      "loss_weight": 1.0
-    }
+    {"role": "user", "content": [{"type": "text", "value": "提问"}], "loss_weight": 0.0},
+    {"role": "assistant", "content": [{"type": "text", "value": "较差回答"}], "loss_weight": 1.0}
   ]
 }
 ```
 
-### 多模态支持
+DPO 训练入口尚未接入，见 [DPO](dpo.md)；但数据层已经支持这套结构。
 
-在 `content` 列表中添加非文本类型的内容：
+### 多模态
+
+`content` 列表里直接掺入非文本类型即可：
 
 ```json
 {
@@ -136,25 +76,35 @@ v1 使用统一的 **Messages 格式**作为标准数据格式。每个样本都
     {
       "role": "user",
       "content": [
-        {"type": "text", "value": "这张图片里有什么？"},
+        {"type": "text", "value": "这张图里有什么？"},
         {"type": "image_url", "value": "path/to/image.jpg"}
       ],
       "loss_weight": 0.0
     },
     {
       "role": "assistant",
-      "content": [{"type": "text", "value": "图片中有一只猫。"}],
+      "content": [{"type": "text", "value": "图里有一只猫。"}],
       "loss_weight": 1.0
     }
   ]
 }
 ```
 
-## 数据集配置文件
+## 已有格式的转换
 
-### dataset_info.yaml 格式
+不想手写 Messages 时，可以让 `converter` 字段把常见格式自动转成标准格式：
 
-`dataset_info.yaml` 支持同时配置多个数据集，数据集默认会混合并打乱顺序。
+| converter | 输入示例 | 适用 |
+|-----------|---------|------|
+| `alpaca` | `{instruction, input, output, system?}` | 单轮指令 |
+| `sharegpt` | `{conversations: [{from, value}], tools?}` | 多轮对话 + tool call |
+| `pair` | `{chosen: [...], rejected: [...]}` | DPO 偏好对 |
+
+每种转换器的字段细节见 [data_plugins](../developer-guide/plugins/data_plugins.md)。
+
+## YAML 配置文件
+
+一个 YAML 可以同时声明多个数据集；最终 `DataEngine` 会把它们按顺序拼成全局索引。
 
 ```yaml
 identity:
@@ -166,32 +116,27 @@ alpaca_en_demo:
   path: ~/data/alpaca_en_demo.json
   source: local
   converter: alpaca
-  size: 500
-  weight: 0.5
+  size: 500          # 限制为 500 条
+  weight: 0.5        # 再缩到一半
   split: train
   streaming: false
 
 hf_dataset:
   path: llamafactory/v1-sft-demo
   source: hf_hub
-  streaming: false
 
 standard:
   path: ~/data/v1_sft_demo.jsonl
-  source: local
-
-custom_dataset:
-  path: custom_data.json
-  source: local
-  converter: custom_converter
-  weight: 1.0
+  source: local       # 不指定 converter，假定数据已是 Messages 格式
 ```
 
-配置字段说明详见 [DatasetInfo 参数参考](../parameter-reference/dataset_info.md)。
+`size` 与 `weight` 同时设置时先 `size` 再 `weight`，行为细节见 [DatasetInfo](../parameter-reference/dataset_info.md)。
 
-## 完整示例
+> **注**：streaming 必须全开或全关。一个 YAML 里同时混合 `streaming: true` 与 `streaming: false` 会在加载阶段直接报错。
 
-### 基础使用
+## 整合到训练配置
+
+最简单的写法——把数据 YAML 路径塞给 `train_dataset`：
 
 ```yaml
 model: Qwen/Qwen3-0.6B
@@ -206,67 +151,26 @@ num_train_epochs: 3
 bf16: true
 ```
 
-### 混合多数据集
-
-**配置文件：`data/mixed_datasets.yaml`**
+混合数据集，给 YAML 里每个条目设 `weight`：
 
 ```yaml
-dataset_1:
-  path: alpaca_en_demo.json
+# data/mixed.yaml
+math:
+  path: data/math.json
   source: local
   converter: alpaca
-  weight: 1.0
-
-dataset_2:
-  path: identity.json
-  source: local
-  converter: alpaca
-  weight: 2.0
-
-dataset_3:
+  weight: 1.5
+chat:
   path: llamafactory/v1-sft-demo
   source: hf_hub
-  weight: 1.5
+  weight: 1.0
 ```
 
 ```yaml
-model: Qwen/Qwen3-0.6B
-template: qwen3_nothink
-train_dataset: data/mixed_datasets.yaml
-
-micro_batch_size: 2
-global_batch_size: 16
-cutoff_len: 2048
-learning_rate: 1e-4
-num_train_epochs: 3
+# 训练配置
+train_dataset: data/mixed.yaml
 ```
 
-### 多模态数据
+## 自定义 converter
 
-```json
-[
-  {
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {"type": "text", "value": "Who are they?"},
-          {"type": "image_url", "value": "mllm_demo_data/1.jpg"}
-        ],
-        "loss_weight": 0.0
-      },
-      {
-        "role": "assistant",
-        "content": [{"type": "text", "value": "They're Kane and Gretzka from Bayern Munich."}],
-        "loss_weight": 1.0
-      }
-    ]
-  }
-]
-```
-
-> **注意**：
-> 1. 所有数据最终都会转换为标准的 Messages 格式
-> 2. 通过 `converter` 字段指定转换器，支持 `alpaca`、`sharegpt`、`pair`，不指定则假定数据为标准格式
-> 3. 通过 `weight` 和 `size` 参数可以灵活控制数据分布
-> 4. 更多技术细节请参考 [DataEngine](../developer-guide/core/data_engine.md) 和 [Data Plugins](../developer-guide/plugins/data_plugins.md)
+注册新的 `DataConverterPlugin` 后，YAML 里直接写 `converter: 你的名字` 即可。完整接口与例子见 [data_plugins](../developer-guide/plugins/data_plugins.md)。

@@ -1,71 +1,111 @@
-# Callback 系统
+# Callback
 
-Callback 系统提供训练过程中的钩子机制，用于日志记录、指标追踪等自定义行为。
+Callback 是观察者：在不修改训练循环代码的前提下，让外部代码在生命周期的固定时间点拿到当前状态做记录、上报、保存等动作。`BaseTrainer.fit` 在每个时间点调用 `CallbackHandler` 把事件转发给所有注册的 callback。
 
-## 设计动机
+代码位置：`src/llamafactory/v1/utils/callbacks/`。
 
-训练循环（`BaseTrainer.fit()`）是固定的，但不同场景需要在特定时机执行额外逻辑（如日志输出、指标上报、早停等）。Callback 系统通过钩子方法将扩展点暴露给用户，无需修改训练循环本身。
+> **注**：`core/utils/callback.py` 是空文件，所有真实代码都在 `utils/callbacks/`。
 
-## 核心类
-
-### TrainerCallback
-
-位于 `src/llamafactory/v1/utils/callbacks/trainer_callback.py`，抽象基类。
+## 接口
 
 ```python
 class TrainerCallback:
-    def on_train_begin(self, trainer): ...
-    def on_epoch_begin(self, trainer, epoch): ...
-    def on_step_begin(self, trainer, step): ...
-    def on_step_end(self, trainer, step, loss, grad_norm, lr): ...
-    def on_log(self, trainer, logs): ...
-    def on_epoch_end(self, trainer, epoch): ...
-    def on_train_end(self, trainer): ...
-    def on_save(self, trainer, output_dir): ...
+    def on_train_begin(self, args, state, **kwargs): ...
+    def on_train_end(self, args, state, **kwargs): ...
+    def on_epoch_begin(self, args, state, **kwargs): ...
+    def on_epoch_end(self, args, state, **kwargs): ...
+    def on_step_begin(self, args, state, **kwargs): ...
+    def on_step_end(self, args, state, **kwargs): ...
+    def on_log(self, args, state, logs, **kwargs): ...
+    def on_save(self, args, state, **kwargs): ...
 ```
 
-### CallbackHandler
+每个钩子都接收：
 
-管理多个 Callback，在对应时机逐一调用：
+- `args`：当前训练的 `TrainingArguments`，只读
+- `state`：`TrainerState` 快照，只读
+- `**kwargs`：当前不强制使用，但 `CallbackHandler` 会传入 `model` / `optimizer` / `lr_scheduler` / `train_dataloader`
 
-```python
-class CallbackHandler:
-    def __init__(self, callbacks: list[TrainerCallback]): ...
+callback 是**观察者**，不应修改训练流程。
 
-    def on_step_end(self, trainer, step, loss, grad_norm, lr):
-        for callback in self.callbacks:
-            callback.on_step_end(trainer, step, loss, grad_norm, lr)
+## 调用顺序
+
+```text
+on_train_begin
+  for each epoch:
+    on_epoch_begin
+      for each step:
+        on_step_begin
+          (forward / backward / optimizer.step)
+        on_step_end
+        [on_log]    # 命中 logging_steps
+        [on_save]   # 命中 save_steps
+    on_epoch_end
+on_train_end
 ```
 
-### TrainerState
+`on_log` 与 `on_save` 不是每步都触发，由 `BaseTrainer` 按 `logging_steps` / `save_steps` 决定。`on_save` 由 `BaseTrainer.save_model` 在最终保存时触发；中间 checkpoint 由 `TrainingCheckpointCoordinator` 写入，本身不直接触发 `on_save`。
 
-训练状态数据类，记录当前训练进度：
+## TrainerState
 
 ```python
 @dataclass
 class TrainerState:
+    epoch: int = 0
     global_step: int = 0
-    current_epoch: int = 0
-    total_epochs: int = 0
-    log_history: list = field(default_factory=list)
+    num_training_steps: int = 0
+    loss: float = 0.0
+    grad_norm: float = 0.0
+    learning_rate: float = 0.0
+    log_history: list[dict[str, Any]] = field(default_factory=list)
 ```
 
-### LoggingCallback
+`BaseTrainer` 在每个 step 末尾把当前指标写入 `state`，callback 应把它当只读快照看待。`log_history` 由 `LoggingCallback` 在 `on_log` 时追加。
 
-内置 Callback，位于 `src/llamafactory/v1/utils/callbacks/logging_callback.py`：
-
-- `on_step_end`：在 rank 0 上输出 loss、grad_norm、learning_rate 到 stdout
-- `on_log`：将日志追加到 `trainer_log.jsonl` 文件
-
-## 扩展点
-
-创建自定义 Callback：
+## CallbackHandler
 
 ```python
-class MyCallback(TrainerCallback):
-    def on_step_end(self, trainer, step, loss, grad_norm, lr):
-        if step % 100 == 0:
-            print(f"Step {step}: loss={loss:.4f}")
+handler = CallbackHandler([LoggingCallback()], trainer=trainer)
+handler.add_callback(MyWandbCallback())
+handler.on_step_end(args, state)
 ```
 
-在 `BaseTrainer` 初始化时传入 Callback 列表。
+`_call` 内部会从 `trainer` 取 `model` / `optimizer` / `lr_scheduler` / `train_dataloader`（即 `train_batch_generator`），通过 `**kwargs` 传给 callback——需要它们时直接 `kwargs.get(...)` 即可。
+
+## 内置 LoggingCallback
+
+```python
+class LoggingCallback(TrainerCallback):
+    def on_log(self, args, state, logs, **kwargs):
+        # 1. 追加到 state.log_history（所有 rank）
+        # 2. rank 0：stdout 打印 + 写入 <output_dir>/trainer_log.jsonl
+```
+
+只 hook 了 `on_log`：`BaseTrainer` 在命中 `logging_steps` 时构造 `logs` dict（含 `epoch` / `step` / `loss` / `grad_norm` / `learning_rate`），交给 callback 决定如何展示和持久化。每行 JSONL 都附带 `total_steps`，崩溃后日志可直接重读。
+
+## 写一个新 callback
+
+```python
+from llamafactory.v1.utils.callbacks import TrainerCallback
+
+class WandbCallback(TrainerCallback):
+    def on_train_begin(self, args, state, **kwargs):
+        import wandb
+        wandb.init(project="lmf", config=vars(args))
+
+    def on_log(self, args, state, logs, **kwargs):
+        import wandb
+        wandb.log(logs, step=state.global_step)
+
+    def on_train_end(self, args, state, **kwargs):
+        import wandb
+        wandb.finish()
+```
+
+注册：
+
+```python
+trainer = SFTTrainer(args, model, renderer, dataset, callbacks=[WandbCallback()])
+```
+
+`BaseTrainer` 会把 `callbacks` 追加到 handler，`LoggingCallback` 默认始终在最前。

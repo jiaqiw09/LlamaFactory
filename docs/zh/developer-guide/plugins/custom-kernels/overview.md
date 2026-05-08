@@ -1,53 +1,74 @@
-# Kernel 插件系统
+# 自定义算子总览
 
-## 概述
+`KernelPlugin` 把"针对特定硬件的高性能 forward 实现"统一管理起来。它的设计目的是：在不改模型权重和数值语义的前提下，根据当前设备替换若干模块的 `forward`，从而让模型自动跑在最快的实现上。
 
-LLaMA-Factory Kernel 插件系统用于管理不同硬件设备提供的高性能计算内核（kernel）实现。该系统通过替换模型中的关键模块（如 RMSNorm、SwiGLU、RoPE、MoE 等）为硬件优化的版本，从而提升模型训练和推理的性能。
+代码位置：`src/llamafactory/v1/plugins/model_plugins/kernels/`。
 
-## 核心特性
+## 基本概念
 
-- **自动注册机制**：基于 `@register_kernel` 装饰器实现自动注册。系统启动时自动扫描 `ops` 目录下的 kernel 实现，注册到全局注册表
-- **设备适配感知**：自动检测当前硬件设备并应用相应的优化，跳过不支持的设备
-- **模块化设计**：每个 kernel 独立实现，互不干扰，可单独或批量应用
-- **后向兼容**：kernel 替换不修改模型权重，保持数值一致性
-- **灵活扩展**：通过继承 `BaseKernel` 基类并使用装饰器，可轻松添加新 kernel
+- **Kernel**：一个继承自 `BaseKernel` 的类，绑定一个 `_kernel_id`（字符串）和一个 `_device`（`DeviceType`）；`apply(model=...)` 把 forward 替换上去
+- **注册表（`Registry`）**：进程级单例字典，存放当前设备能用的所有 kernel
+- **`KernelPlugin("auto")`**：唯一的 `BasePlugin` 入口，按 YAML 里的 `include_kernels` 字段决定启用哪些 kernel
+
+## 启动时发生了什么
+
+`kernels/interface.py` 在 import 时执行：
+
+```python
+default_kernels = scan_all_kernels()
+```
+
+`scan_all_kernels` 遍历 `kernels/ops/` 下所有 `.py` 文件并 `importlib.import_module(...)`，触发每个文件里的 `@register_kernel` 装饰器。`Registry.register` 在注册时检查 kernel 的 `_device` 是否等于当前 accelerator 类型——不匹配就跳过。
+
+结果：`default_kernels` 只包含**当前硬件可用**的 kernel id。
 
 ## 使用方式
 
-### 通过训练 YAML 配置文件使用
+### 1. 通过 YAML 启用
 
 ```yaml
 kernel_config:
   name: auto
-  include_kernels: auto
+  include_kernels: auto         # 启用全部
 ```
 
-### 调用 API 启用
+或显式列出：
+
+```yaml
+kernel_config:
+  name: auto
+  include_kernels: npu_fused_swiglu,npu_fused_rmsnorm
+```
+
+字段语义见 [KernelConfig](../../../parameter-reference/kernel_config.md)。
+
+### 2. 通过 API 启用
 
 ```python
-from llamafactory.v1.plugins.model_plugins.kernels import apply_default_kernels, apply_kernel
+from llamafactory.v1.plugins.model_plugins.kernels.interface import (
+    apply_default_kernels,
+    apply_kernel,
+    get_default_kernels,
+)
 
-# 自动应用所有默认 kernels
+print(get_default_kernels())
 model = apply_default_kernels(model, include_kernels="auto")
-
-# 单独应用某个 kernel
-model = apply_kernel("npu_fused_rmsnorm", model=model)
+apply_kernel("npu_fused_rmsnorm", model=model)
 ```
 
-### 查询已注册的可用 kernels
+`apply_default_kernels` 内部就是按 `include_kernels` 调用 `apply_kernel`，YAML 与 API 路径完全等价。
+
+## 替换是怎么生效的
+
+每个 kernel 的 `apply` 实现遍历 `model.named_modules()`，找到目标类（通常按 `module.__class__.__name__` 匹配），把 `module.forward` 改成融合实现：
 
 ```python
-from llamafactory.v1.plugins.model_plugins.kernels import get_default_kernels
-
-available_kernels = get_default_kernels()
+import types
+module.forward = types.MethodType(npu_swiglu_forward, module)
 ```
 
-各硬件后端提供的具体 kernel 列表见 [多后端支持](../../../multi-backend/index.md)。
+权重不动，因此 kernel 替换不会改变保存出去的模型——它只在当前进程内生效。
 
-## 融合算子详情
+## 加新 Kernel
 
-详见 [融合算子](fused_operators.md)。
-
-## 开发新 Kernel
-
-详见 [Kernel 插件 API](kernels_api.md)。
+接口与最小例子见 [kernels_api](kernels_api.md)；现有算子按类别在 [fused_operators](fused_operators.md) 列出。

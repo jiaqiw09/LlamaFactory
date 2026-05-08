@@ -1,16 +1,32 @@
 # 参数参考
 
-按 v1 配置类组织的纯参数参考表。每页列出参数名、类型、默认值和说明。
+按 v1 配置类组织的参数表。每页只列字段、类型、默认值与说明，不包含端到端流程。
+
+## 顶层参数
+
+入口配置文件直接使用的四个 dataclass：
 
 | 页面 | 说明 |
 |------|------|
-| [DataArguments](data_arguments.md) | 训练/验证数据集路径配置 |
-| [ModelArguments](model_arguments.md) | 模型加载、模板及插件配置 |
-| [TrainingArguments](training_arguments.md) | 训练超参数、Checkpoint 及分布式配置 |
-| [SampleArguments](sample_arguments.md) | 推理采样参数 |
-| [PeftConfig](peft_config.md) | PEFT 子配置：LoRA、Freeze、导出 |
-| [KernelConfig](kernel_config.md) | Kernel 子配置：自定义算子启用 |
-| [DistConfig](dist_config.md) | 分布式子配置：FSDP2、DeepSpeed |
-| [QuantConfig](quant_config.md) | 量化子配置：BNB 4-bit / 8-bit |
-| [InitConfig](init_config.md) | 模型初始化子配置：meta device、rank0 策略 |
-| [DatasetInfo](dataset_info.md) | 数据集 YAML 配置文件格式 |
+| [DataArguments](data_arguments.md) | 训练/验证集路径 |
+| [ModelArguments](model_arguments.md) | 模型、模板与模型相关插件 |
+| [TrainingArguments](training_arguments.md) | 训练超参数、Checkpoint 与分布式插件 |
+| [SampleArguments](sample_arguments.md) | 推理采样配置 |
+
+## 插件子配置
+
+通过顶层参数中的 `*_config` 字段引用，由 `name` 字段决定具体插件分支：
+
+| 页面 | 上层字段 | 适用 `name` |
+|------|----------|-------------|
+| [InitConfig](init_config.md) | `ModelArguments.init_config` | `init_on_default` / `init_on_meta` / `init_on_rank0` |
+| [PeftConfig](peft_config.md) | `ModelArguments.peft_config` | `lora` / `freeze` |
+| [KernelConfig](kernel_config.md) | `ModelArguments.kernel_config` | `auto` |
+| [QuantConfig](quant_config.md) | `ModelArguments.quant_config` | `auto` / `bnb` |
+| [DistConfig](dist_config.md) | `TrainingArguments.dist_config` | `fsdp2` / `deepspeed` |
+
+## 数据集配置文件
+
+| 页面 | 说明 |
+|------|------|
+| [DatasetInfo](dataset_info.md) | `train_dataset` / `eval_dataset` 指向 YAML 文件时的字段格式 |
