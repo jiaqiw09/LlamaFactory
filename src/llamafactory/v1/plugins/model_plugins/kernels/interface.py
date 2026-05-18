@@ -12,129 +12,115 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The definition of kernel interface.
+"""Concrete kernel registrations and public helpers.
 
-Init Phase:
-1. Scan all kernels.
-2. Register default kernels.
-3. Define kernel plugin.
+Each wrapper lazily imports its ``*Kernel`` class and delegates to
+``KernelClass.apply()``, which calls ``check_deps()`` then ``_apply()``.
 
+Routing by ``kernel_config.name``:
+
+* ``name: auto``              → the registered auto selector
+* ``name: npu_fused_rmsnorm`` → that single kernel
+* ``name: [a, b]``            → routed by :func:`apply_kernels`
 """
 
-import importlib
-from pathlib import Path
+from __future__ import annotations
 
-from ....utils import logging
-from ....utils.plugin import BasePlugin
-from ....utils.types import HFModel
-from .registry import Registry
+from typing import TYPE_CHECKING, Any
+
+from .base import KernelNotAvailableError, KernelPlugin
 
 
-logger = logging.get_logger(__name__)
+if TYPE_CHECKING:
+    from ....utils.types import HFModel
 
 
-def scan_all_kernels():
-    """Scan all kernels in the ``ops`` directory.
-
-    Scans the ``ops`` directory for all ``.py`` files and attempts to import them.
-    Importing triggers the :func:`~registry.register_kernel` decorator, which automatically registers the kernels.
-
-    Returns:
-        dict[str, type[BaseKernel]]: A dictionary of registered kernels.
-
-    .. note::
-        This function assumes that the ``ops`` directory is located in the same directory as this file.
-        It recursively searches for ``.py`` files and constructs the module path for import.
-    """
-    ops_path = Path(__file__).parent / "ops"
-
-    if not ops_path.exists():
-        return
-
-    base_package = __package__
-
-    for file_path in ops_path.rglob("*.py"):
-        if file_path.name == "__init__.py":
-            continue
-
-        # calculate the relative path:
-        # file_path = .../kernels_v2/ops/mlp/npu_swiglu.py
-        # rel_path  = ops/mlp/npu_swiglu.py
-        rel_path = file_path.relative_to(Path(__file__).parent)
-
-        # build module path:
-        module_name = ".".join(rel_path.parts)[:-3]
-        full_module_name = f"{base_package}.{module_name}"
-
-        try:
-            importlib.import_module(full_module_name)
-        except Exception as e:
-            logger.warning(f"[Kernel Registry] Failed to import {full_module_name} when loading kernels: {e}")
-
-    return Registry.get_registered_kernels()
+# ---------------------------------------------------------------------------
+# Concrete kernel wrappers
+# ---------------------------------------------------------------------------
 
 
-default_kernels = scan_all_kernels()
+@KernelPlugin("npu_fused_rmsnorm").register()
+def apply_npu_fused_rmsnorm(model: HFModel, **kwargs) -> HFModel:
+    from .ops.rms_norm.npu_rms_norm import NpuRMSNormKernel
+
+    return NpuRMSNormKernel.apply(model=model, **kwargs)
 
 
-def get_default_kernels():
-    """Get a list of default registered kernel IDs.
+@KernelPlugin("npu_fused_rope").register()
+def apply_npu_fused_rope(model: HFModel, **kwargs) -> HFModel:
+    from .ops.rope.npu_rope import NpuRoPEKernel
 
-    Returns:
-        list[str]: List of kernel IDs.
-    """
-    return list(default_kernels.keys())
+    return NpuRoPEKernel.apply(model=model, **kwargs)
 
 
-def apply_kernel(kernel_id: str, **kwargs):
-    """Applies a specific kernel to the model.
+@KernelPlugin("npu_fused_swiglu").register()
+def apply_npu_fused_swiglu(model: HFModel, **kwargs) -> HFModel:
+    from .ops.mlp.npu_swiglu import NpuSwiGLUKernel
 
-    Args:
-        kernel_id (str): The ID of the kernel to apply.
-        **kwargs: Keyword arguments passed to the kernel application function.
-                  Typically includes the model instance.
-
-    Returns:
-        HFModel: The model with applied kernel.
-    """
-    kernel = default_kernels.get(kernel_id)
-    if kernel is None:
-        raise ValueError(f"Kernel {kernel_id} not found")
-
-    kernel.apply(**kwargs)
+    return NpuSwiGLUKernel.apply(model=model, **kwargs)
 
 
-class KernelPlugin(BasePlugin):
-    """Plugin for managing kernel optimizations."""
+@KernelPlugin("npu_fused_moe").register()
+def apply_npu_fused_moe(model: HFModel, **kwargs) -> HFModel:
+    from .ops.mlp.npu_fused_moe import NpuFusedMoEKernel
 
-    pass
+    return NpuFusedMoEKernel.apply(model=model, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# auto selector
+# ---------------------------------------------------------------------------
+
+
+_AUTO_KERNELS = (
+    "npu_fused_moe",
+    "npu_fused_rmsnorm",
+    "npu_fused_rope",
+    "npu_fused_swiglu",
+)
 
 
 @KernelPlugin("auto").register()
-def apply_default_kernels(model: HFModel, include_kernels: str = None) -> HFModel:
-    """Applies all default registered kernels to the model.
+def apply_auto_kernels(model: HFModel, **kwargs) -> HFModel:
+    """Apply the kernels selected by the auto selector."""
+    for kernel_name in _AUTO_KERNELS:
+        try:
+            model = KernelPlugin(kernel_name)(model=model, **kwargs)
+        except KernelNotAvailableError:
+            continue
+    return model
 
-    Args:
-        model (HFModel): The model instance to apply kernels to.
-        include_kernels (str, optional): Comma-separated list of kernel IDs to apply.
-                                         If "auto" or True, applies all default kernels.
-                                         If None or False, no kernels are applied.
-                                         Defaults to None.
 
-    Returns:
-        HFModel: The model with applied kernels.
+def get_auto_kernels() -> list[str]:
+    """List kernel names selected by ``auto``."""
+    return list(_AUTO_KERNELS)
+
+
+# ---------------------------------------------------------------------------
+# Public helpers
+# ---------------------------------------------------------------------------
+
+
+def apply_kernels(model: HFModel, config: dict[str, Any]) -> HFModel:
+    """Apply kernels described by ``kernel_config.name``.
+
+    ``name`` accepts ``"auto"``, a single kernel name, or a list of
+    kernel names. Multi-name routing is scoped to kernels; other plugin
+    families still use a single route name.
     """
-    if not include_kernels:
-        return model
-    elif include_kernels == "auto" or include_kernels is True:
-        use_kernels = default_kernels.keys()
-    else:
-        use_kernels = include_kernels.split(",")  # "kernel_id1,kernel_id2,kernel_id3"
+    kernel_names = config["name"]
+    if not isinstance(kernel_names, list):
+        kernel_names = [kernel_names]
 
-    for kernel in use_kernels:
-        if kernel not in default_kernels:
-            raise ValueError(f"Kernel {kernel} not found")
-
-        apply_kernel(kernel, model=model)
+    for kernel_name in kernel_names:
+        if not isinstance(kernel_name, str):
+            raise TypeError(f"kernel_config.name must be a string or a list of strings; got item {kernel_name!r}.")
+        model = KernelPlugin(kernel_name)(model=model, config=config)
 
     return model
+
+
+def apply_kernel(kernel_id: str, **kwargs) -> HFModel:
+    """Apply a single named kernel."""
+    return KernelPlugin(kernel_id)(**kwargs)

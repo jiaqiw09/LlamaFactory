@@ -122,13 +122,11 @@ class ModelEngine:
         init_kwargs = {} if self._deepspeed_zero3_enabled else {"device_map": init_device}
 
         if self.args.quant_config is not None:
-            from ..plugins.model_plugins.quantization import QuantizationPlugin
+            from ..plugins.model_plugins.quantization.interface import QuantizationPlugin
 
             init_kwargs = QuantizationPlugin(self.args.quant_config.name)(
                 init_kwargs=init_kwargs,
-                config=self.model_config,
-                tokenizer=self.processor,
-                model_args=self.args,
+                quant_config=self.args.quant_config,
                 is_trainable=self.is_train,
             )
 
@@ -175,16 +173,18 @@ class ModelEngine:
             if self.args.peft_config.name == "lora" and init_mode == "init_on_meta":
                 raise ValueError("Currently lora stage does not support loading model by meta.")
 
-            from ..plugins.model_plugins.peft import PeftPlugin
+            from ..plugins.model_plugins.peft.interface import PeftPlugin
 
-            model = PeftPlugin(self.args.peft_config.name)(model, self.args.peft_config, self.is_train)
+            model = PeftPlugin(self.args.peft_config.name)(
+                model,
+                peft_config=self.args.peft_config,
+                is_train=self.is_train,
+            )
 
         if self.args.kernel_config is not None:
-            from ..plugins.model_plugins.kernels.interface import KernelPlugin
+            from ..plugins.model_plugins.kernels.interface import apply_kernels
 
-            model = KernelPlugin(self.args.kernel_config.name)(
-                model, include_kernels=self.args.kernel_config.get("include_kernels")
-            )
+            model = apply_kernels(model=model, config=self.args.kernel_config)
 
         return model
 
