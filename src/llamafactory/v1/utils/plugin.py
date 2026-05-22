@@ -212,38 +212,29 @@ class BasePlugin:
         if self.name is None:
             raise ValueError("Plugin name should be specified.")
 
-        cls = type(self)
         outer = self  # capture for the closure below
 
         def decorator(hub_cls: type) -> type:
-            registered: list[str] = []
+            methods: list[tuple[str, Callable]] = []
             for attr_name, attr_value in vars(hub_cls).items():
-                if attr_name.startswith("_"):
+                if attr_name.startswith("__") and attr_name.endswith("__"):
                     continue
-                # Unwrap staticmethod / classmethod descriptors.
-                func: Any = attr_value
-                if isinstance(func, staticmethod):
-                    func = func.__func__
-                elif isinstance(func, classmethod):
-                    func = func.__func__
-                if not callable(func):
-                    continue
-                cls._registry[outer.name][attr_name] = cls._wrap_with_auto_parse(
-                    func, outer.name, params=params, parse_arg=parse_arg
-                )
-                registered.append(attr_name)
+                if not isinstance(attr_value, staticmethod):
+                    raise TypeError(
+                        f"{hub_cls.__name__}.{attr_name} must be a staticmethod. "
+                        "`register_methods()` only supports stateless method groups."
+                    )
 
-            # Store params / aliases once.
-            if params is not None:
-                cls._params[outer.name] = params
-            if aliases is not None:
-                cls._aliases[outer.name] = aliases
+                methods.append((attr_name, attr_value.__func__))
 
-            if not registered:
+            if not methods:
                 raise ValueError(
                     f"register_methods({outer.name!r}) found no methods on "
                     f"{hub_cls.__name__}; declare @staticmethod methods."
                 )
+
+            for attr_name, func in methods:
+                outer.register(attr_name, params=params, aliases=aliases, parse_arg=parse_arg)(func)
             return hub_cls
 
         return decorator
