@@ -155,7 +155,7 @@ class BaseTrainer:
 
     def _create_batch_generator(self) -> None:
         if (
-            self.args.batching_strategy == BatchingStrategy.PADDING_FREE
+            self.args.batching_strategy in (BatchingStrategy.PADDING_FREE, BatchingStrategy.DYNAMIC_PADDING_FREE)
             and getattr(self.model.config, "_attn_implementation", None) != "flash_attention_2"
         ):
             raise ValueError("`padding_free` requires `flash_attn: flash_attention_2`.")

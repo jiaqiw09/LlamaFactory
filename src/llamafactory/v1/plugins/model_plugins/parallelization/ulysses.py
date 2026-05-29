@@ -52,6 +52,19 @@ def get_ulysses_sequence_parallel_rank(group: ProcessGroup = None) -> int:
     return dist.get_rank(group) if group else 0
 
 
+def _is_reset_packed_position_ids(position_ids: torch.Tensor) -> bool:
+    if position_ids.ndim == 3:
+        batch_size = position_ids.shape[1]
+        position_ids = position_ids[0]
+    else:
+        batch_size = position_ids.shape[0]
+
+    if batch_size != 1:
+        return False
+
+    return torch.count_nonzero(position_ids.reshape(-1) == 0).item() > 1
+
+
 class UlyssesAttention(torch.nn.Module):
     """Initialization.
 
@@ -115,6 +128,7 @@ class UlyssesAttention(torch.nn.Module):
         # in shape : e.g.,  [s/p:h:]
         # (bs, seq_len/N, head_cnt, head_size) -> (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
+        local_query_length = query.shape[1]
         q = SeqAllToAll4D.apply(self.spg, query, self.scatter_idx, self.gather_idx)
         k = SeqAllToAll4D.apply(self.spg, key, self.scatter_idx, self.gather_idx)
         v = SeqAllToAll4D.apply(self.spg, value, self.scatter_idx, self.gather_idx)
@@ -128,10 +142,12 @@ class UlyssesAttention(torch.nn.Module):
             ]
             dist.all_gather(global_position_ids, position_ids, group=self.spg)
             position_ids = torch.cat(global_position_ids, dim=-1).contiguous()
+
+        if position_ids is not None and _is_reset_packed_position_ids(position_ids):
             attention_mask = None
         else:
             if attention_mask is None:
-                attention_mask = torch.ones(q.shape[0], q.shape[1], dtype=torch.int64, device=q.device)
+                attention_mask = torch.ones(q.shape[0], local_query_length, dtype=torch.int64, device=q.device)
             else:
                 attention_mask = attention_mask.to(torch.int64)
 
