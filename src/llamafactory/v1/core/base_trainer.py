@@ -279,14 +279,27 @@ class BaseTrainer:
                     # deepspeed: engine.step() already ran inside backward at the sync boundary
                     grad_norm = self._deepspeed_engine.get_grad_norm()
                 else:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm).item()
+                    dist_name = self.args.dist_config.name if self.args.dist_config is not None else None
+                    if dist_name == "fsdp_turbo":
+                        from ..plugins.trainer_plugins.distributed.hub import DistributedPlugin
 
-                    if self.args.dist_config and self.args.dist_config.get("cp_size", 1) > 1:
+                        grad_norm = DistributedPlugin(dist_name).clip_grad_norm(self.model, self.args.max_grad_norm)
+                    else:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.args.max_grad_norm
+                        ).item()
+
+                    if (
+                        dist_name != "fsdp_turbo"
+                        and self.args.dist_config
+                        and self.args.dist_config.get("cp_size", 1) > 1
+                    ):
                         grad_norm = grad_norm**2
                         grad_norm = DistributedInterface().all_reduce(grad_norm, op=ReduceOp.SUM, dim=Dim.CP)
                         grad_norm = grad_norm**0.5
 
-                    if not torch.isfinite(torch.tensor(grad_norm)):  # type: ignore # pyright: ignore [reportUnknownReturnType]
+                    grad_norm_tensor = torch.tensor(grad_norm)
+                    if not torch.isfinite(grad_norm_tensor):
                         logger.warning_rank0(f"Gradient norm is not finite: {grad_norm}")
                     else:
                         self.optimizer.step()
@@ -337,7 +350,7 @@ class BaseTrainer:
 
     def save_model(self) -> None:
         """Save the model."""
-        if self.args.dist_config is not None and self.args.dist_config.name in ("deepspeed", "fsdp2"):
+        if self.args.dist_config is not None and self.args.dist_config.name in ("deepspeed", "fsdp2", "fsdp_turbo"):
             from ..plugins.trainer_plugins.distributed.hub import DistributedPlugin
 
             DistributedPlugin(self.args.dist_config.name).save_model(

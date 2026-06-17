@@ -1,0 +1,37 @@
+model: /path/to/Qwen3-MoE
+trust_remote_code: true
+model_class: llm
+
+template: qwen3_nothink
+
+dist_config:
+  name: fsdp_turbo
+
+  # LlamaFactory owns CP/Ulysses. FSDPTurbo context parallel remains disabled.
+  cp_size: 1
+  cp_mode: ulysses
+
+  # LlamaFactory owns EP/EFSDP skeleton and outer FSDP. FSDPTurbo supplies dispatchers.
+  ep_size: 2
+  ep_fsdp_size: 1
+  ep_dispatcher: eager
+
+  reshard_after_forward: true
+
+init_config:
+  name: init_on_meta
+
+### data
+train_dataset: data/v1_sft_demo.yaml
+
+### training
+output_dir: outputs/test_qwen3_moe_fsdp_turbo
+micro_batch_size: 1
+cutoff_len: 2048
+learning_rate: 1.0e-4
+bf16: false
+max_steps: 10
+
+### sample
+sample_backend: hf
+max_new_tokens: 128

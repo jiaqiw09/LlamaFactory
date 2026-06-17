@@ -59,6 +59,41 @@ def load_checkpoint_fsdp2(model: HFModel, optimizer: torch.optim.Optimizer, ckpt
     return load_checkpoint(model, optimizer, ckpt_dir, **kwargs)
 
 
+@DistributedPlugin("fsdp_turbo").register()
+def shard_model_fsdp_turbo(model: HFModel, dist_config: PluginConfig, **kwargs) -> HFModel:
+    from .fsdp_turbo import FSDPTurboEngine
+
+    return FSDPTurboEngine(dist_config, bf16=bool(kwargs.get("bf16"))).shard_model(model)
+
+
+@DistributedPlugin("fsdp_turbo").register("save_model")
+def save_model_fsdp_turbo(model: HFModel, output_dir: str, processor: Processor) -> None:
+    from .fsdp2 import save_model
+
+    return save_model(model, output_dir, processor)
+
+
+@DistributedPlugin("fsdp_turbo").register("save_checkpoint")
+def save_checkpoint_fsdp_turbo(model: HFModel, optimizer: torch.optim.Optimizer, ckpt_dir: str, **kwargs) -> None:
+    from .fsdp2 import save_checkpoint
+
+    return save_checkpoint(model, optimizer, ckpt_dir, **kwargs)
+
+
+@DistributedPlugin("fsdp_turbo").register("load_checkpoint")
+def load_checkpoint_fsdp_turbo(model: HFModel, optimizer: torch.optim.Optimizer, ckpt_dir: str, **kwargs) -> None:
+    from .fsdp2 import load_checkpoint
+
+    return load_checkpoint(model, optimizer, ckpt_dir, **kwargs)
+
+
+@DistributedPlugin("fsdp_turbo").register("clip_grad_norm")
+def clip_grad_norm_fsdp_turbo(model: HFModel, max_norm: float, **kwargs) -> float:
+    from .fsdp_turbo import clip_grad_norm_
+
+    return clip_grad_norm_(model, max_norm, **kwargs)
+
+
 @DistributedPlugin("deepspeed").register()
 def shard_model_deepspeed(model: HFModel, dist_config: PluginConfig, **kwargs) -> HFModel:
     if dist_config.get("cp_size", 1) > 1:
