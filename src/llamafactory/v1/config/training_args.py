@@ -115,11 +115,18 @@ class TrainingArguments:
         default=1,
         metadata={"help": "Log metrics every N optimizer steps."},
     )
+    chunk_loss_size: int | None = field(
+        default=None,
+        metadata={"help": "Sequence chunk size for memory-efficient SFT loss. None disables chunk loss."},
+    )
 
     def __post_init__(self) -> None:
         self.dist_config = get_plugin_config(self.dist_config)
         self.optim_config = get_plugin_config(self.optim_config)
         self.lr_scheduler_config = get_plugin_config(self.lr_scheduler_config)
+
+        if self.chunk_loss_size is not None and self.chunk_loss_size <= 0:
+            raise ValueError("`chunk_loss_size` must be positive when chunk loss is enabled.")
 
         if str(self.batching_strategy) == str(BatchingStrategy.DYNAMIC_BATCHING):
             if self.max_steps is None or self.max_steps <= 0:
