@@ -4,6 +4,10 @@
 
 ## 保存训练 Checkpoint
 
+`save_steps` 按更新步数触发保存，`save_epochs` 按数据遍历进度触发保存。同时设置时，训练器根据 `save_epochs` 重新计算并覆盖 `save_steps`。纯 `dynamic_batching` 只支持按 step 保存。
+
+以下字段位于训练 YAML 的顶层：
+
 ```yaml
 save_steps: 500
 save_epochs: null
@@ -14,6 +18,8 @@ save_ckpt_as_hf: false
 `save_steps` 与 `save_epochs` 控制触发时机。`save_total_limit` 删除最旧的完整 checkpoint。
 
 ## 从 Checkpoint 恢复训练
+
+`resume_from_checkpoint` 恢复训练状态。以下配置从当前 `output_dir` 中自动查找 checkpoint：
 
 ```yaml
 resume_from_checkpoint: auto
@@ -31,7 +37,7 @@ resume_from_checkpoint: auto
 
 FSDP2、FSDPTurbo 和 DeepSpeed 启用 `save_ckpt_as_hf` 后，仍会保留用于恢复训练的原始 checkpoint，同时额外保存 HF 格式模型。聚合完整模型权重会提高保存时的内存占用。
 
-除非需要在训练过程中直接获得 HF 格式的中间模型，否则保持 `save_ckpt_as_hf: false`，可以避免每次保存 checkpoint 时额外聚合完整模型权重。
+`save_ckpt_as_hf: false` 是默认值，保存中间 checkpoint 时不额外聚合 HF 格式权重。
 
 ## 初始化权重与恢复训练
 
@@ -40,7 +46,7 @@ FSDP2、FSDPTurbo 和 DeepSpeed 启用 `save_ckpt_as_hf` 后，仍会保留用�
 | `dist_config.dcp_path` | 使用 DCP 权重初始化模型 | FSDP2/FSDPTurbo 模型分片阶段 | 仅模型权重 |
 | `resume_from_checkpoint` | 从训练 checkpoint 继续训练 | Trainer 初始化阶段 | 模型、优化器、学习率调度器、批次进度、训练步数及可用的随机数状态 |
 
-例如，只加载已有 DCP 模型权重并开始一次新训练时使用：
+以下配置使用已有 DCP 模型权重初始化新训练：
 
 ```yaml
 dist_config:
@@ -48,7 +54,7 @@ dist_config:
   dcp_path: path/to/dcp_model
 ```
 
-需要从 `output_dir` 中最新的完整 checkpoint 继续原训练时使用：
+以下配置从 `output_dir` 中最新的完整 checkpoint 恢复训练状态：
 
 ```yaml
 resume_from_checkpoint: auto

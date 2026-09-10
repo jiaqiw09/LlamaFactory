@@ -2,7 +2,15 @@
 
 训练命令检测到多设备后会自动通过 `torchrun` 启动。拓扑字段属于 `TrainingArguments`，后端专属字段放在 `dist_config`。
 
+本页列出后端和拓扑配置，完整任务配置见 [SFT](sft.md)、[DPO](dpo.md)和 [RM](rm.md)。设备安装与支持范围见 [NPU 说明](../multi-backend/npu/index.md)。
+
+## 数据并行
+
+未设置 `dist_config` 时，多个 DP 进程使用 DDP，每个进程持有完整模型；单设备直接训练。
+
 ## FSDP2
+
+FSDP2 通过分片降低每个设备上的模型状态内存开销，配置入口为 `dist_config.name: fsdp2`。
 
 ```yaml
 dist_config:
@@ -21,7 +29,7 @@ FSDPTurbo 在 FSDP2 基础上提供 MoE 专家并行和专家参数分片。先�
 python -m pip install -r requirements/fsdpturbo.txt
 ```
 
-然后在 `dist_config` 中选择 `fsdpturbo`：
+FSDPTurbo 的配置入口为 `dist_config.name: fsdpturbo`：
 
 ```yaml
 dist_config:
@@ -34,15 +42,17 @@ dist_config:
 
 ## DeepSpeed
 
+DeepSpeed 后端从 `config_file` 读取 ZeRO 等配置，该字段必填。
+
 ```yaml
 dist_config:
   name: deepspeed
   config_file: examples/deepspeed/ds_z3_config.json
 ```
 
-`config_file` 是必填字段。
-
 ## Ulysses Context Parallel
+
+Ulysses CP 跨设备切分序列计算，由顶层 `cp_mode` 和 `cp_size` 启用：
 
 ```yaml
 flash_attn: flash_attention_2
@@ -53,9 +63,11 @@ dist_config:
   name: fsdp2
 ```
 
-设置 `cp_size > 1` 后，`BaseTrainer` 根据 `cp_mode` 调用 `SequenceParallelModelPlugin("ulysses")`，并使用 Sequence Parallel loss 完成跨 CP 进程的损失聚合。Ulysses 需要 `flash_attention_2` 和 FSDP2，但不要求特定的 `batching_strategy`；可以根据数据类型和序列长度选择 `normal` 或支持的 padding-free 策略。
+设置 `cp_size > 1` 后，训练使用 Ulysses 通信和 Sequence Parallel loss 完成跨 CP 进程的损失聚合。Ulysses 需要 `flash_attention_2` 和 FSDP2，不要求特定的 `batching_strategy`，支持 `normal` 和符合[批处理约束](batching.md)的 padding-free 策略。
 
-`cp_size` 需要能够整除 world size。模型的 attention head 数需要能够整除 `cp_size`，KV head 数需要能够整除 `cp_size`，或能够被 `cp_size` 整除。当前只有 SFT 支持 `cp_size > 1`；DPO 和 RM 要求 `cp_size: 1`。
+`cp_size` 需要能够整除 world size。模型的 attention head 数必须能被 `cp_size` 整除，即 `num_attention_heads % cp_size == 0`；例如 32 个 attention head 可以使用 `cp_size: 2`。KV head 数与 `cp_size` 则要求其中一个能被另一个整除，即 `num_key_value_heads % cp_size == 0` 或 `cp_size % num_key_value_heads == 0`。当前只有 SFT 支持 `cp_size > 1`；DPO 和 RM 要求 `cp_size: 1`。
+
+当前训练器不支持 `model_type: qwen3_5` 的 CP 路径。
 
 ## 配置并行拓扑
 

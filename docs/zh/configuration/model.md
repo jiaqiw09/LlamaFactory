@@ -52,13 +52,26 @@ classification 模型，`other` 使用 `AutoModel`。
 
 ## quant_config
 
+当前 v1 注册了 `bnb` 和 `auto` 两个量化插件入口。`bnb` 使用 bitsandbytes；`auto` 在指定有效位宽后也转交 `bnb`，当前没有按模型或环境切换到其他量化后端的逻辑。
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `name` | `str` | 必填 | `bnb` 或 `auto` |
-| `quantization_bit` | `int \| None` | `None` | 4 或 8；QLoRA 使用 4-bit |
+| `quantization_bit` | `int \| None` | `None` | 量化加载位宽，4 或 8 |
 | `compute_dtype` | `str \| torch.dtype` | `float16` | 4-bit 计算和存储 dtype |
 | `double_quantization` | `bool` | `true` | 是否启用 4-bit double quant |
-| `quantization_type` | `str` | `nf4` | 4-bit 量化类型 |
+| `quantization_type` | `str` | `nf4` | 4-bit 量化格式，`nf4` 或 `fp4` |
+
+4-bit 分支将 `compute_dtype`、`double_quantization` 和 `quantization_type` 传给 [Hugging Face BitsAndBytesConfig](https://huggingface.co/docs/transformers/main_classes/quantization#transformers.BitsAndBytesConfig)，其中 NF4 和 FP4 是 bitsandbytes 的两种 4-bit 格式。8-bit 分支设置 `load_in_8bit=True`，不使用这三个 4-bit 专属字段。
+
+`quantization_bit` 的字段默认值为 `None`，实际行为取决于 `name`：
+
+- 不设置 `quant_config` 或将其设为 `null` 时，不通过此插件添加量化加载配置。
+- `name: auto` 且省略 `quantization_bit`（或设为 `null`）时，保持模型加载参数不变。
+- `name: bnb` 且省略 `quantization_bit`（或设为 `null`）时，使用 4-bit 量化。
+- `name: auto` 且指定 `quantization_bit` 为 `4` 或 `8` 时，转交 `bnb` 实现处理，仍需满足该实现的依赖和运行条件。
+
+以上描述插件构造量化加载配置的行为。[SFT 的 QLoRA 示例](../feature-guide/sft.md#qlora)展示 `bnb`、4-bit、NF4 与 LoRA 的组合。
 
 ## init_config
 

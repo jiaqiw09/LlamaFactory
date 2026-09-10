@@ -4,6 +4,10 @@ v1 将训练样本统一为 Messages 结构。`DataEngine` 根据 `train_dataset
 
 ## 配置训练数据集
 
+训练 YAML 的 `train_dataset` 指定数据来源。数据文件路径或 Hub ID 对应单个 Messages 格式数据集；数据集 YAML 则通过条目描述数据路径、split、converter 和采样配置，并支持组合多个数据集。
+
+训练 YAML 包含 `model`、`train_dataset` 等训练字段；数据集 YAML 以数据集名称为键，包含 `path`、`source`、`converter` 等字段。下文“组合多个数据集”展示数据集 YAML 的结构。
+
 `train_dataset` 接受以下形式：
 
 - 本地数据集 YAML，例如 `data/v1_sft_demo.yaml`
@@ -72,7 +76,7 @@ demo:
   streaming: false
 ```
 
-同一个 YAML 中的 streaming 配置必须一致；当前训练路径不支持 streaming 数据集。多个条目会组成一个全局数据索引；`size` 与 `weight` 用于控制每个数据集的采样规模。
+同一个 YAML 中的 streaming 配置必须一致；当前训练路径不支持 streaming 数据集。多个条目会组成一个全局数据索引；`size` 与 `weight` 用于控制每个数据集的采样规模，计算顺序与有放回抽样的含义见[采样规模的计算](../configuration/data.md#采样规模的计算)。
 
 ## 转换现有数据格式
 

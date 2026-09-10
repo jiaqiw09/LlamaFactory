@@ -1,8 +1,12 @@
 # 奖励模型训练（RM）
 
-`rm` 入口使用序列分类模型对 chosen/rejected 回答进行成对排序训练。
+`rm` 入口训练回答评分模型，使 chosen 回答的评分高于 rejected 回答。
+
+RM 与 [DPO](dpo.md) 使用相同的偏好对数据结构，输出模型用于回答评分，不作为普通聊天模型使用。
 
 ## 训练配置
+
+`peft_config.name: lora` 启用 LoRA，未配置 `peft_config` 时进行全参训练。分布式后端由 `dist_config` 配置，支持条件见[分布式训练](distributed_training.md)。以下为完整的 LoRA RM 配置（`config.yaml`）：
 
 ```yaml
 model: Qwen/Qwen3-0.6B

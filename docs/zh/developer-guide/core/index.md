@@ -8,6 +8,7 @@ Core 负责连接配置、数据、模型和训练流程。各组件由 Trainer 
 | [ModelEngine](model_engine.md) | 加载 Processor、Renderer 和模型 | `core/model_engine.py` |
 | [Renderer](renderer.md) | 将 Messages 转换为模型输入 | `core/rendering/` |
 | [BaseTrainer](base_trainer.md) | 管理通用训练生命周期 | `core/base_trainer.py` |
+| [BaseSampler](base_sampler.md) | 选择推理后端并连接生成接口 | `core/base_sampler.py` |
 | [BatchGenerator](batch_generator.md) | 生成批次并恢复批次状态 | `core/utils/batching.py` |
 | [Callback](callback.md) | 分发训练生命周期事件 | `utils/callbacks/` |
 
@@ -19,6 +20,7 @@ data_engine
 model_engine
 renderer
 base_trainer
+base_sampler
 batch_generator
 callback
 ```

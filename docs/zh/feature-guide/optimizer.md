@@ -1,10 +1,12 @@
 # 优化器
 
-未设置 `optim_config` 时，v1 使用 AdamW，并从顶层 `learning_rate` 读取学习率。
+`optim_config` 未设置或为 `null` 时，v1 使用 AdamW，并从顶层 `learning_rate` 读取学习率。
 
 ## Muon
 
 设置 `optim_config.name: muon` 启用 Muon。Muon 对适合正交化更新的二维权重使用 Muon，并将偏置、归一化参数、embedding、输出层和 LoRA 参数交给内部 AdamW。
+
+以下为完整的 SFT 配置（`config.yaml`）：
 
 ```yaml
 model: Qwen/Qwen3-0.6B
@@ -34,4 +36,4 @@ max_steps: 10
 llamafactory-cli sft config.yaml
 ```
 
-学习率统一由顶层 `learning_rate` 控制，不在 `optim_config` 中重复设置。仓库示例见 `examples/v1/train_full/train_full_muon.yaml`，完整字段见[训练参数](../configuration/training.md#optim_config)。
+学习率统一由顶层 `learning_rate` 控制。仓库示例见 `examples/v1/train_full/train_full_muon.yaml`，完整字段见[训练参数](../configuration/training.md#optim_config)。

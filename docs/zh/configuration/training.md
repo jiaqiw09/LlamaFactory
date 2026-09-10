@@ -18,6 +18,10 @@
 | `seed` | `int` | `42` | 随机种子 |
 | `full_determinism` | `bool` | `false` | 是否启用完整确定性模式 |
 
+`global_batch_size` 与 `micro_batch_size` 共同决定每次参数更新需要累积多少个 micro-batch。省略 `global_batch_size` 时，每个 DP 进程每次更新处理一个 micro-batch；显式设置时，它必须能被 `dp_size × micro_batch_size` 整除，每个进程的累积次数为 `global_batch_size / (dp_size × micro_batch_size)`。
+
+例如，`dp_size: 4`、`micro_batch_size: 2`、`global_batch_size: 32` 对应每个 DP 进程累积 4 个 micro-batch。固定样本数策略下，一次更新共使用 32 条样本；动态策略中的实际样本数随长度变化，`global_batch_size` 仍决定累积次数，token 预算见[批处理策略](../feature-guide/batching.md)。
+
 ### 批处理配置
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -32,7 +36,7 @@
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `dist_config` | `dict \| None` | `None` | FSDP2 或 DeepSpeed 配置 |
+| `dist_config` | `dict \| None` | `None` | FSDP2、FSDPTurbo 或 DeepSpeed 配置 |
 | `dp_size` | `int \| None` | `None` | 默认由 world size 和 `cp_size` 推导 |
 | `cp_size` | `int` | `1` | Context Parallel 大小 |
 | `cp_mode` | `str` | `ulysses` | Context Parallel 实现 |
